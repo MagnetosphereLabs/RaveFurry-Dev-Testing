@@ -2,8 +2,11 @@
 from django.http import HttpResponse
 from django.shortcuts import redirect
 import logging
+import os
 
-from core import audit_log, ip_screening, site_mode, user_manager
+from core import audit_log, ip_screening, redis, site_mode, user_manager
+from core.util import strtobool
+from redis.exceptions import RedisError
 
 from django.db import DatabaseError, OperationalError, close_old_connections, connections
 
@@ -82,6 +85,25 @@ class DatabaseConnectionCleanupMiddleware:
 
     def __call__(self, request):
         if request.path == "/_healthz/":
+            recovery_reason = ""
+            try:
+                failed = redis.connection.get("playback_worker_failed")
+                if failed is not None and strtobool(failed):
+                    recovery_reason = "playback worker failed"
+            except (RedisError, ValueError) as error:
+                logger.warning("runtime health check failed: %s", error)
+                recovery_reason = "runtime health unavailable"
+            if recovery_reason:
+                if os.name == "nt":
+                    from core.musiq import windows_player  # pylint: disable=import-outside-toplevel
+
+                    if windows_player.recovery_would_interrupt_playback():
+                        return HttpResponse(
+                            "recovery deferred while media is active", content_type="text/plain"
+                        )
+                return HttpResponse(
+                    recovery_reason, status=503, content_type="text/plain"
+                )
             return HttpResponse("ok", content_type="text/plain")
 
         close_old_connections()
@@ -182,3 +204,4 @@ class AfterHoursModeMiddleware:
             return redirect("afterhours")
 
         return self.get_response(request)
+
