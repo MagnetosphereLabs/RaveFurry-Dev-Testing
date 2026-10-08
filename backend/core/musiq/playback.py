@@ -104,6 +104,7 @@ def start() -> None:
     redis.put("backup_playing", False)
     redis.put("operator_command", "")
     redis.put("stop_playback_loop", False)
+    redis.put("playback_worker_failed", False)
 
     _handle_buzzer.delay()
     _loop.delay()
@@ -589,20 +590,20 @@ class Playback:
 
             catch_up = self._catch_up(current_song, recovered)
 
-            try:
-                self.player().start_song(current_song, catch_up)
-            except PlaybackError:
-                # when a song can't be started, pause the playback
-                # and have the user restart playback manually after fixing the error
-                musiq.controller._pause()
-                musiq.update_state()
-                continue
-            redis.put("playing", True)
-
-            musiq.update_state()
-
-            # don't wait for the song to end if catch_up is negative (=the song should be skipped)
+            # An expired recovered song must not be started again, even
+            # briefly, before advancing to the next queue entry.
             if catch_up is None or catch_up >= 0:
+                try:
+                    self.player().start_song(current_song, catch_up)
+                except PlaybackError:
+                    # when a song can't be started, pause the playback
+                    # and have the user restart playback manually after fixing the error
+                    musiq.controller._pause()
+                    musiq.update_state()
+                    continue
+                redis.put("playing", True)
+
+                musiq.update_state()
                 if not self._wait_until_song_end():
                     # there was an error while waiting for the song to end
                     # This happens when we could not connect to mopidy (ConnectionError)
@@ -638,9 +639,18 @@ class Playback:
 
 @app.task
 def _loop() -> None:
-    playback = Playback()
-    playback.loop()
-    connection.close()
+    try:
+        playback = Playback()
+        playback.loop()
+    except Exception:  # pylint: disable=broad-except
+        # HTTP can remain responsive after this background task dies. Let the
+        # supervisor detect that failure without treating idle/paused playback
+        # as unhealthy. The persisted current song and queue remain available.
+        logging.exception("playback worker exited unexpectedly")
+        redis.put("playback_worker_failed", True)
+        raise
+    finally:
+        connection.close()
 
 
 @app.task
@@ -719,3 +729,4 @@ def stop() -> None:
     """Stops the playback main loop, only used for tests."""
     redis.put("stop_playback_loop", True)
     queue_changed.set()
+
