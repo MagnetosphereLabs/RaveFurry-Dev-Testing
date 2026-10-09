@@ -52,6 +52,7 @@ class Raveberry:
             nargs="?",
             help="""\
 run         run a basic version of Raveberry
+visualizer  run only the local OBS background/audio analyzer
 install     install Raveberry into the system
 help        show this help and exit""",
         )
@@ -117,12 +118,28 @@ help        show this help and exit""",
             sys.exit(1)
 
         command = args.command.lstrip("-")
-        choices = ["run", "install"]
+        choices = ["run", "install", "visualizer"]
         if command not in choices:
             parser.print_help()
             sys.exit(1)
         elif command == "run":
             self.run_server(args.nomopidy, args.celery)
+        elif command == "visualizer":
+            # Standalone Linux/service deployments get the same isolated recovery
+            # as `run`, without initializing Django or starting music playback.
+            if self.directory not in sys.path:
+                sys.path.insert(0, self.directory)
+            from visualizer.supervisor import VisualizerCompanion
+            companion = VisualizerCompanion(self.directory)
+            try:
+                companion.start()
+                while companion.thread and companion.thread.is_alive():
+                    companion.thread.join(timeout=.5)
+            except KeyboardInterrupt:
+                pass
+            finally:
+                companion.close()
+            sys.exit(companion.exit_code)
         elif command == "install":
             self.install(
                 config_confirmed=args.confirm_config,
@@ -716,6 +733,7 @@ help        show this help and exit""",
             additional_env["DJANGO_NO_CELERY"] = "1"
 
         server = None
+        visualizer = None
         try:
             subprocess.check_call(
                 [sys.executable, "manage.py", "migrate"],
@@ -732,6 +750,15 @@ help        show this help and exit""",
 
             admin_link = self._login_link("/admin/")
             moderator_link = self._login_link("/moderator/")
+
+            # Independent of the web/playback child: no between-song restarts,
+            # database polling or recovery actions are added to music playback.
+            try:
+                from visualizer.supervisor import VisualizerCompanion
+                visualizer = VisualizerCompanion(self.directory)
+                visualizer.start()
+            except Exception as error:  # an optional feature cannot block music
+                print(f"OBS visualizer unavailable: {error}", flush=True)
 
             if os.name == "nt":
                 self.console_lock = threading.Lock()
@@ -774,6 +801,11 @@ help        show this help and exit""",
         except KeyboardInterrupt:
             pass
         finally:
+            if visualizer is not None:
+                try:
+                    visualizer.close()
+                except Exception as error:
+                    print(f"OBS visualizer cleanup: {error}", flush=True)
             if server and server.poll() is None:
                 server.terminate()
                 try:
