@@ -230,7 +230,8 @@ export function onReady() {
 
   // info popup for the current song
   $('#current-song-title').on('click tap', function() {
-    if (state.currentSong == null) {
+    // The embedded player now links directly; retain the legacy title modal elsewhere.
+    if (this.tagName === 'A' || state == null || state.currentSong == null) {
       return;
     }
     const url = state.currentSong.externalUrl;
