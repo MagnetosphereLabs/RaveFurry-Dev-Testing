@@ -27,6 +27,8 @@
         box-sizing: border-box;
       }
 
+      [hidden] { display: none !important; }
+
       html,
       body {
         width: 100%;
@@ -68,7 +70,7 @@
       .hero {
         padding: 18px;
         display: grid;
-        grid-template-columns: 1fr auto;
+        grid-template-columns: minmax(0, 340px) minmax(0, 1fr);
         gap: 14px;
         align-items: center;
       }
@@ -85,16 +87,17 @@
 
       .hero-actions {
         display: flex;
+        min-width: 0;
         justify-content: flex-end;
         align-items: center;
       }
       
       .toolbar {
         display: flex;
-        flex-wrap: nowrap;
+        flex-wrap: wrap;
         align-items: center;
         gap: 10px;
-        overflow-x: auto;
+        max-width: 100%;
       }
 
       .button,
@@ -166,19 +169,21 @@
 
       .layout {
         display: grid;
-        grid-template-columns: minmax(0, 1.5fr) minmax(320px, 0.95fr);
-        gap: 77px;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 16px;
         align-items: start;
       }
 
       .stack {
         display: grid;
+        min-width: 0;
         gap: 16px;
       }
 
       .section {
         padding: 18px;
         display: grid;
+        min-width: 0;
         gap: 14px;
       }
 
@@ -207,6 +212,9 @@
         background: rgba(255, 255, 255, 0.05);
         color: rgba(255, 255, 255, 0.94);
         font-size: 13px;
+        max-width: 100%;
+        min-width: 0;
+        overflow-wrap: anywhere;
       }
 
       .song-card,
@@ -219,11 +227,12 @@
         border: 1px solid var(--line);
         background: rgba(255, 255, 255, 0.045);
       }
-      body.song-only .layout > .stack:nth-child(2),
+      body.song-only .layout > .stack:nth-child(2) > .section:not(#review-section),
       body.song-only #event-mode-button,
       body.song-only #closing-mode-button,
       body.song-only #afterhours-mode-button,
       body.song-only #audit-section { display: none !important; }
+      body.song-only .layout { grid-template-columns: minmax(0, 1fr); }
       mark.lyric-profanity { background:#f5c542; color:#111; padding:0 2px; }
       mark.lyric-slur { background:#d7193f; color:#fff; padding:0 2px; }
 
@@ -256,19 +265,29 @@
       }
 
       .queue-item {
-        grid-template-columns: minmax(260px, 0.9fr) minmax(420px, 1.35fr);
-        align-items: center;
+        grid-template-columns: minmax(0, 1fr);
+        align-items: start;
+        min-width: 0;
       }
       
       .queue-item .queue-actions {
-        display: grid;
-        grid-template-columns: repeat(3, minmax(132px, 1fr));
+        display: flex;
+        flex-wrap: wrap;
         width: 100%;
+        min-width: 0;
+      }
+
+      .queue-item .queue-actions > button {
+        flex: 1 1 132px;
+        min-width: 0;
+        max-width: 100%;
+        white-space: normal;
+        overflow-wrap: anywhere;
       }
 
       .current-song-layout {
         display: grid;
-        grid-template-columns: 96px minmax(0, 1fr) auto;
+        grid-template-columns: 96px minmax(0, 1fr);
         gap: 18px;
         align-items: center;
       }
@@ -276,10 +295,13 @@
       .current-song-cover { width:96px; height:96px; border-radius:16px; object-fit:cover; background:rgba(255,255,255,.04); box-shadow:0 10px 28px rgba(0,0,0,.32); }
       
       .current-song-actions {
-        display: grid;
+        grid-column: 1 / -1;
+        display: flex;
+        flex-wrap: wrap;
         gap: 10px;
-        min-width: 170px;
+        min-width: 0;
       }
+      .current-song-actions > button { flex: 1 1 132px; min-width: 0; max-width: 100%; white-space: normal; }
       
       .queue-artist {
         color: var(--muted);
@@ -315,6 +337,7 @@
       input[type="search"],
       input[type="password"] {
         width: 100%;
+        min-width: 0;
         border: 1px solid var(--line);
         background: rgba(255, 255, 255, 0.06);
         color: var(--text);
@@ -460,6 +483,7 @@
       select,
       input[type="file"] {
         width: 100%;
+        min-width: 0;
         border: 1px solid var(--line);
         background: rgba(255, 255, 255, 0.06);
         color: var(--text);
@@ -487,9 +511,12 @@
 
       .field-grid {
         grid-template-columns: repeat(2, minmax(0, 1fr));
+        align-items: start;
       }
 
       .field-label {
+        min-width: 0;
+        align-content: start;
         color: var(--muted);
         font-size: 13px;
       }
@@ -798,8 +825,14 @@
       input.account-switch::before { content: ''; position: absolute; top: 3px; left: 3px; width: 16px; height: 16px; background: currentColor; border-radius: 50%; transition: transform 260ms cubic-bezier(.22,1,.36,1); }
       input.account-switch:checked { background: rgba(255,255,255,.18); }
       input.account-switch:checked::before { transform: translateX(18px); }
-      .account-card { display: grid; gap: 12px; }
-      .account-card-header { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+      .account-card { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; align-items: start; }
+      .account-card-header { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 12px; min-width: 0; }
+      .account-card-header > div, .account-access > span { min-width: 0; flex: 1 1 0; overflow-wrap: anywhere; }
+      .account-role-option > span { min-width: 0; overflow-wrap: anywhere; }
+      .account-role-picker, .account-editor, .account-role-controls { min-width: 0; }
+      .account-role-controls > button { flex: 1 1 132px; min-width: 0; max-width: 100%; white-space: normal; }
+      .account-editor .field-label > input { min-width: 0; min-height: 48px; }
+      .account-card .queue-actions > button { flex-basis: 160px; }
       .account-role-controls { display: flex; gap: 6px; flex-wrap: wrap; }
       .account-role-controls button[aria-pressed="true"] { background: var(--panel-strong); border-color: rgba(255,255,255,.3); }
       .account-card[aria-busy="true"] { opacity: .7; transition: opacity 220ms ease; }
