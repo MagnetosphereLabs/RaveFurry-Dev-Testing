@@ -31,7 +31,7 @@ buzzer_stopped = redis.Event("buzzer_stopped")
 queue = models.QueuedSong.objects
 
 def _ordered_confirmed_queue():
-    confirmed = queue.confirmed().filter(review_status__in=["clear", "approved"]).annotate(queue_rank=Case(When(priority_tier="extra", then=Value(1)), default=Value(0), output_field=IntegerField()))
+    confirmed = queue.playable().annotate(queue_rank=Case(When(priority_tier="extra", then=Value(1)), default=Value(0), output_field=IntegerField()))
     voting_enabled = storage.get("interactivity") in [
         storage.Interactivity.upvotes_only,
         storage.Interactivity.full_voting,
@@ -280,11 +280,6 @@ class Playback:
                 song = _ordered_confirmed_queue().first()
                 if song is not None:
                     song_id = song.id
-                    song = queue.remove(song_id, snapshot=False, transfer=True)
-            elif storage.get("shuffle"):
-                confirmed = list(queue.confirmed())
-                if confirmed:
-                    song_id = random.choice(confirmed).id
                     song = queue.remove(song_id, snapshot=False, transfer=True)
             else:
                 song_id, song = queue.dequeue()
