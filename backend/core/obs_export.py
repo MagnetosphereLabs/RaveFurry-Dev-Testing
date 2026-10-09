@@ -58,7 +58,7 @@ def write_current_song_tick(
             song_utils.format_seconds(effective_duration),
             getattr(current_song, "title", "") or "",
             getattr(current_song, "artist", "") or "",
-            _stringify(getattr(current_song, "votes", 0) or 0),
+            _stringify(getattr(current_song, "votes", 0) or 0) + (" vote" if getattr(current_song, "votes", 0) == 1 else " votes"),
         ]
         _write_lines(output_dir / "songcurrent.txt", current_lines)
         if current_song:
@@ -95,7 +95,7 @@ def write_from_state(state: Dict[str, Any]) -> None:
                 or song_utils.format_seconds(current_song.get("duration") or 0),
                 current_song.get("title") or current_song.get("name") or "",
                 current_song.get("artist") or "",
-                _stringify(current_song.get("votes") or 0),
+                _stringify(current_song.get("votes") or 0) + (" vote" if current_song.get("votes") == 1 else " votes"),
             ]
         else:
             current_lines = ["", "", "", "", ""]
@@ -113,7 +113,7 @@ def write_from_state(state: Dict[str, Any]) -> None:
             queue_lines = [
                 song.get("title") or song.get("name") or "",
                 song.get("artist") or "",
-                _stringify(song.get("votes") or 0),
+                _stringify(song.get("votes") or 0) + (" vote" if song.get("votes") == 1 else " votes"),
                 song.get("durationFormatted")
                 or song_utils.format_seconds(song.get("duration") or 0),
             ]
