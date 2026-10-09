@@ -1,10 +1,11 @@
 import {registerSpecificState} from '../base';
-import {getStoredVote} from './vote-state';
+import {getStoredVote, paintVotes} from './vote-state';
+import {initPanels, updateAutoPreview, refreshOpenHistory} from './panels';
 import {showPlayButton, showPauseButton} from './buttons';
 import {syncAudioStream} from './audio';
 
 export let state = null;
-let animationInProgress = false;
+const rowAnimations = new Map<HTMLElement, Animation>();
 let lastStateReceivedAt = 0;
 
 function formatSeconds(totalSeconds) {
@@ -106,7 +107,8 @@ export function updateState(newState) {
     $('#current-song-title').trigger('change');
     $('#current-song').removeClass('present own-song-current');
     $('#current-song').addClass('empty');
-    $('#current-song').removeAttr('data-queue-key');
+    $('#current-song').removeAttr('data-queue-key data-occurrence-id');
+    $('#current-song-title').removeAttr('href');
     $('#current-song-artwork')
         .removeAttr('src')
         .attr('hidden', 'hidden')
@@ -136,7 +138,8 @@ export function updateState(newState) {
     }
 
     $('#current-song').removeClass('empty').addClass('present');
-    $('#current-song').attr('data-queue-key', String(currentSong.queueKey));
+    $('#current-song').attr('data-queue-key', String(currentSong.queueKey)).attr('data-occurrence-id', currentSong.occurrenceId);
+    $('#current-song-title').attr('href', safeExternalUrl(currentSong.externalUrl));
     
     if (currentSong.artworkUrl) {
       $('#current-song-artwork')
@@ -150,7 +153,7 @@ export function updateState(newState) {
           .hide();
     }
 
-    const previousVote = getStoredVote(currentSong.queueKey);
+    const previousVote = getStoredVote(currentSong.occurrenceId);
     if (previousVote == '+') {
       $('#song-votes .vote-up').addClass('pressed');
       $('#song-votes .vote-down').removeClass('pressed');
@@ -299,6 +302,12 @@ export function updateState(newState) {
   applyQueueChange(oldState, state);
   syncClosingBanner(state);
 
+  paintVotes();
+  if (!oldState || JSON.stringify(oldState.songQueue.map(s => s.occurrenceId)) !== JSON.stringify(state.songQueue.map(s => s.occurrenceId)) ||
+      oldState.currentSong?.occurrenceId !== state.currentSong?.occurrenceId) {
+    document.dispatchEvent(new CustomEvent('furatic:refresh-personal-votes'));
+  }
+  if (oldState && oldState.currentSong?.occurrenceId !== state.currentSong?.occurrenceId) refreshOpenHistory();
   syncAudioStream();
 }
 
@@ -306,6 +315,10 @@ export function updateState(newState) {
  * @param {HTMLElement} element the div the displayname should be inserted into
  * @param {Object} song the song the info is taken from
  */
+function safeExternalUrl(url): string | undefined {
+  return /^https?:\/\//i.test(String(url || '')) ? url : undefined;
+}
+
 function insertDisplayName(element, song) {
   if (song.artist == null || song.artist == '') {
     element.text(song.title);
@@ -440,7 +453,10 @@ function createQueueItem() {
  */
 function updateInformation(entry, song) {
   entry.attr('data-queue-key', String(song.id));
+  entry.attr('data-occurrence-id', song.occurrenceId || String(song.id));
+  entry.attr('data-priority-tier', song.priorityTier || 'normal');
   entry.attr('data-next-up-locked', song.isNextUpLocked ? 'true' : 'false');
+  entry.toggleClass('ui-state-disabled', Boolean(song.isNextUpLocked));
 
   const row = entry.find('.queue-entry');
   row.toggleClass('queue-entry-ready', Boolean(song.internalUrl));
@@ -467,11 +483,15 @@ function updateInformation(entry, song) {
   }
 
   const title = entry.find('.queue-title');
-  insertDisplayName(title, song);
-  title.attr('href', song.externalUrl || '#').attr('title', 'Open song in a new tab');
+  const display = JSON.stringify([song.artist, song.title]);
+  if (entry.attr('data-display') !== display) { insertDisplayName(title, song); entry.attr('data-display', display); }
+  if (safeExternalUrl(song.externalUrl)) title.attr('href', song.externalUrl); else title.removeAttr('href');
+  title.attr('title', 'Open song in a new tab');
   row.toggleClass('has-artwork', Boolean(song.artworkUrl));
   if (song.artworkUrl) {
-    entry.find('.queue-artwork').attr('src', song.artworkUrl).show();
+    const artwork = entry.find('.queue-artwork');
+    if (artwork.attr('src') !== song.artworkUrl) artwork.attr('src', song.artworkUrl);
+    artwork.show();
   } else {
     entry.find('.queue-artwork').removeAttr('src').hide();
   }
@@ -532,7 +552,7 @@ function updateInformation(entry, song) {
  up.removeClass('pressed');
  down.removeClass('pressed');
  
- const previousVote = getStoredVote(song.id);
+ const previousVote = getStoredVote(song.occurrenceId);
  if (previousVote == '+') {
    up.addClass('pressed');
  } else if (previousVote == '-') {
@@ -540,117 +560,97 @@ function updateInformation(entry, song) {
  }
 }
 
-/** Apply the given state without any animation from scratch.
- * @param {Object} newState the new state object
- */
-function rebuildSongQueue(newState) {
-  animationInProgress = false;
-  $('#song-queue').empty();
-  $.each(newState.songQueue, function(index, song) {
-    const queueEntry = createQueueItem();
-    updateInformation(queueEntry, song);
-    queueEntry.appendTo($('#song-queue'));
+/** Fade departing visible cards while the remaining keyed rows move into place. */
+function animateExit(list: HTMLElement, row: HTMLElement, enabled: boolean) {
+  const rect = row.getBoundingClientRect();
+  const viewport = list.parentElement.getBoundingClientRect();
+  if (enabled && !window.matchMedia('(prefers-reduced-motion: reduce)').matches &&
+      typeof row.animate === 'function' && rect.height > 0 &&
+      rect.bottom > viewport.top && rect.top < viewport.bottom &&
+      list.querySelectorAll('.furatic-queue-exit').length < 6) {
+    const ghost = row.cloneNode(true) as HTMLElement;
+    ghost.removeAttribute('data-occurrence-id'); ghost.removeAttribute('data-queue-key');
+    ghost.classList.remove('furatic-queue-item-enter');
+    ghost.classList.add('furatic-queue-exit', 'ui-state-disabled');
+    ghost.setAttribute('aria-hidden', 'true'); ghost.setAttribute('inert', '');
+    Object.assign(ghost.style, {position:'absolute', top:row.offsetTop + 'px', left:row.offsetLeft + 'px',
+      width:rect.width + 'px', margin:'0', pointerEvents:'none', zIndex:'2'});
+    list.appendChild(ghost);
+    const animation = ghost.animate([{opacity:1, transform:'translateY(0) scale(1)', filter:'blur(0)'},
+      {opacity:0, transform:'translateY(-6px) scale(.985)', filter:'blur(8px)'}],
+      {duration:300, easing:'cubic-bezier(.22,1,.36,1)', fill:'both'});
+    animation.finished.catch(() => undefined).then(() => { animation.cancel(); ghost.remove(); });
+  }
+  row.remove();
+}
+
+/** Keyed FLIP: measure real row positions; retain nodes, focus and existing entry effects. */
+export function reconcileList(selector: string, songs: any[], animate = true, history = false) {
+  const list = document.querySelector<HTMLElement>(selector);
+  if (!list || list.classList.contains('ui-sortable-active')) return;
+  const existing = new Map<string, HTMLElement>();
+  const before = new Map<string, DOMRect>();
+  Array.from(list.children).forEach((row: HTMLElement) => {
+    const key = row.dataset.occurrenceId;
+    if (!key) return;
+    existing.set(key, row);
+    before.set(key, row.getBoundingClientRect());
+    const running = rowAnimations.get(row);
+    if (running) { running.cancel(); rowAnimations.delete(row); }
+  });
+  const keep = new Set<string>();
+  const targets: HTMLElement[] = [];
+  for (const song of songs) {
+    const key = String(song.occurrenceId || song.id);
+    keep.add(key);
+    let row = existing.get(key);
+    const added = !row;
+    if (!row) row = createQueueItem()[0];
+    updateInformation($(row), song);
+    if (history) {
+      row.removeAttribute('data-queue-key');
+      row.removeAttribute('data-priority-tier');
+      row.querySelectorAll('.queue-info-controls, .download-icon, .vote-indicators').forEach(node => node.remove());
+      const duration = row.querySelector('.queue-info-time');
+      duration.setAttribute('title', 'Played ' + new Date(song.endedAt).toLocaleTimeString());
+    }
+    // appendChild on an already ordered node would also disturb focus every poll.
+    const index = targets.length;
+    if (list.children[index] !== row) list.insertBefore(row, list.children[index] || null);
+    if (added && animate && !window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      row.classList.add('furatic-queue-item-enter');
+      window.setTimeout(() => row.classList.remove('furatic-queue-item-enter'), 820);
+    }
+    targets.push(row);
+  }
+  existing.forEach((row, key) => { if (!keep.has(key)) animateExit(list, row, animate); });
+  if (!animate || window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  targets.forEach(row => {
+    const previous = before.get(row.dataset.occurrenceId);
+    if (!previous || typeof row.animate !== 'function') return;
+    const after = row.getBoundingClientRect();
+    const delta = previous.top - after.top;
+    if (Math.abs(delta) < 1 || !after.height) return;
+    const animation = row.animate([{transform: `translateY(${delta}px)`}, {transform: 'translateY(0)'}], {
+      duration: 500, easing: 'cubic-bezier(0.22, 1, 0.36, 1)',
+    });
+    rowAnimations.set(row, animation);
+    animation.finished.catch(() => undefined).then(() => {
+      if (rowAnimations.get(row) === animation) { rowAnimations.delete(row); animation.cancel(); }
+    });
   });
 }
 
-/** Find the differences between the old and the new state, initiate animations.
- * @param {Object} oldState the current state from which the animations start
- * @param {Object} newState the new state to which it should be animated
- */
 function applyQueueChange(oldState, newState) {
-  if (animationInProgress) return;
-
-  if ($('#song-queue > li[data-next-up-locked="true"]').length) {
-    $('#song-queue > li[data-next-up-locked="true"]').addClass('ui-state-disabled');
+  const split = Boolean(document.getElementById('auto-song-queue'));
+  const songs = newState.songQueue || [];
+  reconcileList('#song-queue', split ? songs.filter(s => s.priorityTier !== 'extra') : songs, oldState !== null);
+  if (split) {
+    const extras = songs.filter(s => s.priorityTier === 'extra');
+    reconcileList('#auto-song-queue', extras, oldState !== null);
+    updateAutoPreview(extras);
   }
-
-  if (oldState == null) {
-    rebuildSongQueue(newState);
-  } else {
-    // find mapping from old to new indices
-    const newIndices = [];
-    $.each(oldState.songQueue, function(oldIndex, song) {
-      const newIndex = newState.songQueue.findIndex((other) => {
-        return other.id == song.id;
-      });
-      newIndices.push(newIndex);
-    });
-
-    // add new songs
-    $.each(newState.songQueue, function(newIndex, song) {
-      if (!newIndices.includes(newIndex)) {
-        // song was not present in old indices -> append new song to the end
-        const queueEntry = createQueueItem();
-        updateInformation(queueEntry, song);
-        queueEntry.addClass('furatic-queue-item-enter');
-        queueEntry.css('opacity', '0');
-
-        queueEntry.appendTo($('#song-queue'));
-
-        window.setTimeout(function() {
-          queueEntry.removeClass('furatic-queue-item-enter');
-        }, 820);
-
-        // store its target index in our array
-        newIndices.push(newIndex);
-      }
-    });
-
-    // initiate transition to their new positions
-    let animationNeeded = false;
-    const transitionDuration = 0.5;
-    $('#song-queue>li').css('top', '0px');
-    $('#song-queue>li').css('transition',
-        'top ' + transitionDuration + 's ease, ' +
-        'opacity ' + transitionDuration + 's ease');
-
-    let liHeight = $('#song-queue>li').first().outerHeight();
-    liHeight -= parseFloat($('#song-queue>li').first()
-        .css('border-bottom-width'));
-
-    $('#song-queue>li').each(function(index, li) {
-      if (newIndices[index] == -1) {
-        // item was deleted
-        animationNeeded = true;
-        $(li).css('opacity', '0');
-      } else if (index >= oldState.songQueue.length) {
-        // item was added just now
-        // make new songs visible
-        animationNeeded = true;
-        $(li).css('opacity', '1');
-        const delta = (newIndices[index] - index) * liHeight;
-        $(li).css('top', delta + 'px');
-      } else {
-        // update information of existing songs directly
-        // instead of after the animation.
-        // -> faster updates and updates for cases where no animation is started
-        // (e.g. placeholder updates)
-        const song = newState.songQueue[newIndices[index]];
-        updateInformation($(li), song);
-
-        // skip items that don't move at all
-        if (newIndices[index] == index) {
-          return;
-        }
-        // item was moved
-        animationNeeded = true;
-        const delta = (newIndices[index] - index) * liHeight;
-        $(li).css('top', delta + 'px');
-      }
-    });
-
-    if (animationNeeded) {
-      animationInProgress = true;
-      // update queue after animations
-      setTimeout(function() {
-        $('#song-queue>li').css('transition', 'none');
-        // update the queue to the now current state
-        rebuildSongQueue(state);
-      }, transitionDuration * 1000);
-    } else {
-      $('#song-queue>li').css('transition', 'none');
-    }
-  }
+  $('#song-queue > li[data-next-up-locked="true"]').addClass('ui-state-disabled');
 }
 
 $(document).ready(() => {
@@ -659,6 +659,7 @@ $(document).ready(() => {
   }
 
   registerSpecificState(updateState);
+  initPanels(songs => reconcileList('#history-song-queue', songs.map(song => ({...song, occurrenceId: 'history-' + song.id, durationFormatted: formatSeconds(song.duration)})), false, true));
 
   window.setInterval(function() {
     updateCurrentSongTimeLabels();
