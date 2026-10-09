@@ -67,8 +67,12 @@ class CoreConfig(AppConfig):
             
             from core import playback_state_backup  # pylint: disable=import-outside-toplevel
             playback_state_backup.restore_if_database_empty()
+
+            from core import voting
+            voting.import_legacy_votes()
             
             redis.start()
+            voting.restore_presentation_cache()
 
             from core import site_mode  # pylint: disable=import-outside-toplevel
             site_mode.set_mode(site_mode.get_mode())
