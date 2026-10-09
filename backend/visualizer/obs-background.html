@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FURATIC OBS Background</title>
+<style>
+*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#12294b}
+canvas{display:block;width:100%;height:100%}
+#status{position:absolute;bottom:10px;left:12px;color:#fff;font:13px system-ui;background:#15233bcc;padding:6px 9px;border-radius:5px;pointer-events:none}
+#status[hidden]{display:none}
+</style>
+</head>
+<body>
+<canvas id="background" role="img" aria-label="FURATIC colored gas clouds with music-reactive lighting"></canvas>
+<div id="status" hidden></div>
+<script>
+(() => {
+  'use strict';
+  const canvas=document.getElementById('background'),status=document.getElementById('status');
+  const options=new URLSearchParams(location.search);
+  const debug=options.get('debug')==='1',demo=options.get('demo');
+  const validModes=['silence','gentle','rhythm','intense'];
+  const simulated=validModes.includes(demo);
+  const port=Number(options.get('port')||((location.protocol==='http:'&&['127.0.0.1','localhost'].includes(location.hostname))?location.port:8766));
+  const delay=Math.max(0,Math.min(.250,Number(options.get('delay')||0)/1000))||0;
+  // Enough fixed slots for the detector's maximum onset rate, including delay.
+  const LIGHT_COUNT=64;
+  const gl=canvas.getContext('webgl2',{alpha:false,antialias:false,depth:false,stencil:false,preserveDrawingBuffer:false,powerPreference:'high-performance'});
+  function report(message,error=false){status.hidden=!debug&&!error;status.textContent=message;}
+  if(!gl){report('WebGL2 unavailable. Enable browser-source hardware acceleration.',true);return;}
+  const vs = `#version 300 es
+  in vec2 a_position;
+  out vec2 v_uv;
+  void main(){v_uv=a_position*.5+.5;gl_Position=vec4(a_position,0.,1.);}`;
+  const fs = `#version 300 es
+  precision highp float;
+  in vec2 v_uv;
+  uniform vec2 u_resolution;
+  uniform vec4 u_motion;
+  uniform vec4 u_clouds[4];
+  uniform vec4 u_music;
+  uniform float u_bands[48];
+  uniform vec4 u_flashes[64];
+  out vec4 fragColor;
+  float hash(vec2 p){vec3 p3=fract(vec3(p.xyx)*.1031);p3+=dot(p3,p3.yzx+33.33);return fract((p3.x+p3.y)*p3.z);}
+  float noise(vec2 p){vec2 i=floor(p),f=fract(p);f=f*f*(3.-2.*f);return mix(mix(hash(i),hash(i+vec2(1,0)),f.x),mix(hash(i+vec2(0,1)),hash(i+1.),f.x),f.y);}
+  float fbm(vec2 p){float n=0.,a=.53;for(int i=0;i<4;i++){n+=a*noise(p);p=mat2(.8,.6,-.6,.8)*p*2.03+13.7;a*=.5;}return n;}
+  vec3 pigment(int i){
+    if(i==0)return pow(vec3(0.,142.,248.)/255.,vec3(2.2));
+    if(i==1)return pow(vec3(182.,72.,196.)/255.,vec3(2.2));
+    if(i==2)return pow(vec3(213.,107.,12.)/255.,vec3(2.2));
+    return pow(vec3(52.,217.,0.)/255.,vec3(2.2));
+  }
+  float spectrum(float k){k=clamp(k,0.,47.);int i=int(floor(k));return mix(u_bands[i],u_bands[min(i+1,47)],fract(k));}
+  float spot(vec2 p,vec2 centre,vec2 spread){vec2 d=(p-centre)/spread;return exp(-dot(d,d));}
+  void main(){
+    vec2 uv=v_uv;float aspect=u_resolution.x/u_resolution.y;
+    vec2 local[4];float ownership[4];float density[4];float detail[4];float sheen[4];float ray[4];
+    float total=0.;
+    // A soft partition keeps each colored volume distinct as it travels.
+    for(int i=0;i<4;i++){
+      vec2 d=(uv-u_clouds[i].xy)*vec2(aspect,1.);
+      vec2 axis=u_clouds[i].zw;
+      local[i]=vec2(dot(d,axis),dot(d,vec2(-axis.y,axis.x)));
+      vec2 broad=local[i]/vec2(.69,.53);
+      ownership[i]=exp(-dot(broad,broad)*3.8);
+      total+=ownership[i];
+    }
+    vec3 col=vec3(.003,.008,.026);
+    for(int i=0;i<4;i++){
+      ownership[i]/=max(total,.00001);
+      vec2 p=local[i]+vec2(float(i)*7.3,float(i)*4.1);
+      float mist=fbm(p*2.9+u_motion.xy*1.7);
+      float grain=fbm(vec2(p.x*8.1,p.y*13.2)+u_motion.zw*.8);
+      float pigmentDepth=.06+1.6*pow(smoothstep(.20,.77,mist),2.);
+      density[i]=pigmentDepth*(.40+.90*pow(smoothstep(.17,.80,grain),1.4));
+      vec2 plane=vec2(p.x*.64+p.y*.77,-p.x*.77+p.y*.64);
+      float layers=fbm(vec2(plane.x*3.6,plane.y*32.)+u_motion.xw*.55);
+      detail[i]=pow(smoothstep(.26,.72,layers),2.);
+      vec2 slope=vec2(dFdx(mist)*u_resolution.x,dFdy(mist)*u_resolution.y)*.40;
+      vec3 normal=normalize(vec3(-slope,.85));
+      sheen[i]=pow(max(0.,dot(normal,normalize(vec3(-.35,.24,1.)))),9.);
+      ray[i]=spot(local[i],vec2(-.17,.02),vec2(.60,.17));
+      float band=i==0?spectrum(3.+clamp(local[i].x+.5,0.,1.)*12.):
+                 i==1?spectrum(15.+clamp(local[i].x+.5,0.,1.)*17.):
+                 i==2?spectrum(7.+clamp(local[i].x+.5,0.,1.)*20.):
+                      spectrum(30.+clamp(local[i].x+.5,0.,1.)*17.);
+      float energy=i==0?u_music.y:i==1?u_music.z:i==2?u_music.y*.65:u_music.w;
+      float strength=i==0?.24:i==1?.24:i==2?.43:.29;
+      vec3 c=pigment(i);
+      float body=strength*density[i]+.035+energy*.09;
+      float scattered=ray[i]*(.035+.18*density[i])*(.75+energy*.35);
+      float paint=detail[i]*(.17+energy*.22)*(.18+.65*ray[i]);
+      float surface=sheen[i]*(.006+band*.08+u_music.w*.018);
+      col+=c*(body+scattered+paint+surface)*ownership[i];
+    }
+    for(int i=0;i<64;i++){
+      vec4 flash=u_flashes[i];float age=flash.z;
+      if(flash.w<=0.||age<0.||age>=1.9)continue;
+      int cloud=clamp(int(flash.x),0,3);
+      float envelope=(1.-exp(-age/.018))*(exp(-age/.23)+.16*exp(-age/.75))*(1.-smoothstep(1.45,1.9,age))*flash.w;
+      vec2 p=local[cloud];
+      float illumination=spot(p,vec2(-.05,.02),vec2(.70,.43));
+      float focus=spot(p,vec2(-.12,.05),vec2(.28,.16));
+      float scattering=.20+.80*clamp(density[cloud],0.,1.);
+      vec3 c=pigment(cloud);
+      col+=c*envelope*(illumination*.92+focus*1.50+ray[cloud]*.70)*scattering*ownership[cloud];
+      float highlight=sheen[cloud]*detail[cloud];
+      col+=mix(c,vec3(.75),.28)*envelope*highlight*illumination*.75*ownership[cloud];
+    }
+    col*=1.-.07*dot(uv-.5,uv-.5);
+    fragColor=vec4(max(col,0.),1.);
+  }`;
+  const blurFS = `#version 300 es
+  precision highp float;
+  in vec2 v_uv;
+  uniform sampler2D u_image;
+  uniform vec2 u_step;
+  uniform int u_extract;
+  out vec4 fragColor;
+  vec3 sampleLight(vec2 uv) {
+    vec3 c=texture(u_image,uv).rgb;
+    if(u_extract==1) {float peak=max(c.r,max(c.g,c.b));float knee=smoothstep(.12,.36,peak);c*=knee;}
+    return c;
+  }
+  void main() {
+    vec3 c=sampleLight(v_uv)*.227027;
+    c+=(sampleLight(v_uv+u_step*1.384615)+sampleLight(v_uv-u_step*1.384615))*.316216;
+    c+=(sampleLight(v_uv+u_step*3.230769)+sampleLight(v_uv-u_step*3.230769))*.070270;
+    fragColor=vec4(c,1.);
+  }`;
+  const displayFS = `#version 300 es
+  precision highp float;
+  in vec2 v_uv;
+  uniform sampler2D u_image;
+  uniform sampler2D u_bloom;
+  out vec4 fragColor;
+  void main() {
+    vec3 col=texture(u_image,v_uv).rgb+texture(u_bloom,v_uv).rgb*.40;
+    col=max(vec3(0.),col-min(col.r,min(col.g,col.b))*.72);
+    col=1.-exp(-col*.80);
+    float lum=dot(col,vec3(.2126,.7152,.0722));
+    float rolloff=lum<.10?lum:.10+.075*(1.-exp(-max(0.,lum-.10)/.075));
+    col*=rolloff/max(.000001,lum);
+    fragColor=vec4(pow(max(col,0.),vec3(1./2.2)),1.);
+  }`;
+
+  let programs=[],buffer=null,targets=[],loc={},w=0,h=0,lost=false,stopped=false,raf=0;
+  let socket=null,reconnectTimer=0,retry=500,lastReceived=-Infinity,lastIds=null,connectionOpened=0;
+  let lastFrame=0,flowClock=0,simPhase=0,activity=0,driftActivity=0;
+  const bands=new Float32Array(48),music=new Float32Array(4),desiredBands=new Float32Array(48),desiredMusic=new Float32Array(4);
+  const clouds=new Float32Array(16),motion=new Float32Array(4),flashes=new Float32Array(LIGHT_COUNT*4);
+  const lights=Array.from({length:LIGHT_COUNT},()=>({born:-100,cloud:0,strength:0}));
+  const cloudPhases=[3*Math.PI/4,Math.PI/4,5*Math.PI/4,7*Math.PI/4];
+  const presets={silence:[0,0,96],gentle:[.17,.16,78],rhythm:[.52,.65,112],intense:[.88,1,138]};
+
+  function compile(type,source){
+    const shader=gl.createShader(type);gl.shaderSource(shader,source);gl.compileShader(shader);
+    if(!gl.getShaderParameter(shader,gl.COMPILE_STATUS)){const error=gl.getShaderInfoLog(shader);gl.deleteShader(shader);throw new Error(error);}
+    return shader;
+  }
+  function program(fragment){
+    let vertex=null,pixel=null,p=null;
+    try{vertex=compile(gl.VERTEX_SHADER,vs);pixel=compile(gl.FRAGMENT_SHADER,fragment);p=gl.createProgram();gl.attachShader(p,vertex);gl.attachShader(p,pixel);gl.linkProgram(p);if(!gl.getProgramParameter(p,gl.LINK_STATUS))throw new Error(gl.getProgramInfoLog(p));return p;}
+    catch(error){if(p)gl.deleteProgram(p);throw error;}
+    finally{if(vertex)gl.deleteShader(vertex);if(pixel)gl.deleteShader(pixel);}
+  }
+  function target(width,height,floatBuffer){
+    const tex=gl.createTexture(),fbo=gl.createFramebuffer();gl.bindTexture(gl.TEXTURE_2D,tex);
+    gl.texImage2D(gl.TEXTURE_2D,0,floatBuffer?gl.RGBA16F:gl.RGBA8,width,height,0,gl.RGBA,floatBuffer?gl.HALF_FLOAT:gl.UNSIGNED_BYTE,null);
+    for(const [name,value] of [[gl.TEXTURE_MIN_FILTER,gl.LINEAR],[gl.TEXTURE_MAG_FILTER,gl.LINEAR],[gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE],[gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE]])gl.texParameteri(gl.TEXTURE_2D,name,value);
+    gl.bindFramebuffer(gl.FRAMEBUFFER,fbo);gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,tex,0);
+    if(gl.checkFramebufferStatus(gl.FRAMEBUFFER)!==gl.FRAMEBUFFER_COMPLETE){gl.deleteFramebuffer(fbo);gl.deleteTexture(tex);if(floatBuffer)return target(width,height,false);throw new Error('Rendering target unavailable');}
+    return {tex,fbo,w:width,h:height};
+  }
+  function freeTargets(){for(const t of targets){gl.deleteFramebuffer(t.fbo);gl.deleteTexture(t.tex);}targets=[];}
+  function freeGPU(){freeTargets();for(const p of programs)gl.deleteProgram(p);programs=[];if(buffer)gl.deleteBuffer(buffer);buffer=null;}
+  function resize(){
+    const width=Math.max(1,Math.min(1920,Math.round(canvas.clientWidth*(window.devicePixelRatio||1))));
+    const height=Math.max(1,Math.min(1080,Math.round(canvas.clientHeight*(window.devicePixelRatio||1))));
+    if(w===width&&h===height&&targets.length)return;
+    w=width;h=height;canvas.width=w;canvas.height=h;freeTargets();const floats=!!gl.getExtension('EXT_color_buffer_float');
+    try{targets.push(target(w,h,floats));targets.push(target(Math.ceil(w/2),Math.ceil(h/2),floats));targets.push(target(Math.ceil(w/2),Math.ceil(h/2),floats));}
+    catch(error){freeTargets();throw error;}
+  }
+  function initialize(){
+    programs=[];targets=[];buffer=null;
+    for(const f of [fs,blurFS,displayFS])programs.push(program(f));
+    buffer=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,buffer);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,3,-1,-1,3]),gl.STATIC_DRAW);
+    for(const p of programs){gl.useProgram(p);const a=gl.getAttribLocation(p,'a_position');gl.enableVertexAttribArray(a);gl.vertexAttribPointer(a,2,gl.FLOAT,false,0,0);}
+    const at=(p,n)=>gl.getUniformLocation(programs[p],n);
+    loc={res:at(0,'u_resolution'),motion:at(0,'u_motion'),clouds:at(0,'u_clouds[0]'),music:at(0,'u_music'),bands:at(0,'u_bands[0]'),flashes:at(0,'u_flashes[0]'),blurImage:at(1,'u_image'),blurStep:at(1,'u_step'),blurExtract:at(1,'u_extract'),image:at(2,'u_image'),bloom:at(2,'u_bloom')};
+    resize();
+  }
+  function birth(cloud,strength,born){
+    if(strength<.004)return;
+    const slot=lights.find(light=>born-light.born>=1.9||light.strength===0);
+    if(slot){slot.cloud=cloud;slot.strength=Math.min(1,strength);slot.born=born;}
+  }
+  const clamp=value=>Math.max(0,Math.min(1,value));
+  function receive(raw){
+    if(typeof raw!=='string'||raw.length>16384)return;
+    let data;try{data=JSON.parse(raw);}catch(error){return;}
+    if(!data||typeof data!=='object')return;
+    if(data.version!==1||!Array.isArray(data.bands)||data.bands.length!==48||!data.bands.every(Number.isFinite))return;
+    const values=[data.level,data.bass,data.mid,data.treble,data.activity,data.serverTime,data.kickAt,data.accentAt,data.kickId,data.accentId,data.kick,data.accent];
+    if(!values.every(Number.isFinite))return;
+    const now=performance.now()/1000;lastReceived=now;retry=500;
+    desiredMusic.set([clamp(data.level),clamp(data.bass),clamp(data.mid),clamp(data.treble)]);
+    desiredBands.set(data.bands.map(clamp));activity=clamp(data.activity);
+    if(lastIds){
+      for(const [name,cloud] of [['kick',0],['accent',1]]){
+        const age=Math.max(0,data.serverTime-data[name+'At']);
+        if(data[name+'Id']>lastIds[name]&&age<.30&&data.status==='capturing'){
+          birth(cloud,clamp(data[name]),now-age+delay);
+          if(name==='kick')birth(2,clamp(data[name])*.22,now-age+delay);
+        }
+      }
+    }
+    lastIds={kick:data.kickId,accent:data.accentId};
+    report(`${data.status} · ${data.error||data.device||'system output'} · local audio analysis`);
+  }
+  function scheduleReconnect(){
+    if(stopped||simulated||reconnectTimer)return;
+    reconnectTimer=setTimeout(()=>{reconnectTimer=0;connect();},retry);retry=Math.min(10000,retry*1.6);
+  }
+  function connect(){
+    if(stopped||simulated)return;
+    if(!Number.isInteger(port)||port<1024||port>65535){report('Invalid local visualizer port',true);return;}
+    if(socket)return;
+    connectionOpened=performance.now()/1000;
+    let ws;
+    try{ws=new WebSocket(`ws://127.0.0.1:${port}/features`);}catch(error){report('Local audio connection unavailable · ambient motion');scheduleReconnect();return;}
+    socket=ws;
+    ws.onopen=()=>{lastIds=null;report('Connected to local audio analysis');};
+    ws.onmessage=event=>{if(socket===ws)receive(event.data);};
+    ws.onerror=()=>ws.close();
+    ws.onclose=()=>{if(socket!==ws)return;socket=null;lastIds=null;report('Waiting for local audio analysis · ambient motion');scheduleReconnect();};
+  }
+  function simulate(dt,now){
+    const [level,strength,tempo]=presets[demo];const previous=simPhase;simPhase+=dt*tempo/60;
+    if(level&&Math.floor(previous)!==Math.floor(simPhase)){birth(0,strength,now);birth(2,strength*.22,now);}
+    if(level&&Math.floor(previous*2)!==Math.floor(simPhase*2)&&Math.floor(simPhase*2)%2===1)birth(1,strength*.68,now);
+    const melody=.5+.5*Math.sin(now*1.71+.8*Math.sin(now*.37));
+    desiredMusic.set([level*(.74+.16*melody),level*.35,level*(.35+.30*melody),level*.28]);
+    for(const light of lights){const age=now-light.born;if(age>=0&&age<1.9){const e=(1-Math.exp(-age/.018))*Math.exp(-age/.20)*light.strength;desiredMusic[light.cloud===1?2:1]+=e*.7;}}
+    for(let i=0;i<48;i++){const x=i/47;desiredBands[i]=level*(.04+.48*Math.exp(-Math.pow((x-(.48+.22*Math.sin(now*.33)))*8,2)));}
+    activity=level*.75;lastReceived=now;report('Simulated '+demo+' passage');
+  }
+  function update(dt,now){
+    if(simulated)simulate(dt,now);
+    if(now-lastReceived>.50){desiredMusic.fill(0);desiredBands.fill(0);activity=0;}
+    for(let i=0;i<4;i++)music[i]+=(desiredMusic[i]-music[i])*(1-Math.exp(-dt/(desiredMusic[i]>music[i]?.022:.23)));
+    for(let i=0;i<48;i++)bands[i]+=(desiredBands[i]-bands[i])*(1-Math.exp(-dt/(desiredBands[i]>bands[i]?.025:.19)));
+    // A bounded speed increase; silence keeps the same uninterrupted orbit.
+    driftActivity+=(activity-driftActivity)*(1-Math.exp(-dt/.60));
+    flowClock+=dt*(1+.28*music[0]+.20*driftActivity);
+    const rotation=flowClock*2*Math.PI/300;
+    for(let i=0;i<4;i++){
+      const angle=rotation+cloudPhases[i];
+      clouds[i*4]=.5+.43*Math.cos(angle);clouds[i*4+1]=.5+.43*Math.sin(angle);
+      const orientation=-.08+.07*Math.sin(flowClock*.013+i*.9);
+      clouds[i*4+2]=Math.cos(orientation);clouds[i*4+3]=Math.sin(orientation);
+    }
+    // Double-precision phases become bounded GPU uniforms: smooth even after days.
+    motion.set([Math.sin(flowClock*.019),Math.cos(flowClock*.013),Math.sin(flowClock*.011),Math.cos(flowClock*.017)]);
+    for(let i=0;i<LIGHT_COUNT;i++){
+      const light=lights[i],age=now-light.born;if(age>=1.9)light.strength=0;
+      flashes[i*4]=light.cloud;flashes[i*4+1]=0;flashes[i*4+2]=age;flashes[i*4+3]=light.strength;
+    }
+    if(socket&&now-Math.max(lastReceived,connectionOpened)>3){socket.close();}
+  }
+  function texture(unit,tex){gl.activeTexture(gl.TEXTURE0+unit);gl.bindTexture(gl.TEXTURE_2D,tex);}
+  function render(){
+    const [scene,a,b]=targets;
+    gl.useProgram(programs[0]);gl.bindFramebuffer(gl.FRAMEBUFFER,scene.fbo);gl.viewport(0,0,w,h);
+    gl.uniform2f(loc.res,w,h);gl.uniform4fv(loc.motion,motion);gl.uniform4fv(loc.clouds,clouds);gl.uniform4fv(loc.music,music);gl.uniform1fv(loc.bands,bands);gl.uniform4fv(loc.flashes,flashes);gl.drawArrays(gl.TRIANGLES,0,3);
+    gl.useProgram(programs[1]);gl.bindFramebuffer(gl.FRAMEBUFFER,a.fbo);gl.viewport(0,0,a.w,a.h);texture(0,scene.tex);gl.uniform1i(loc.blurImage,0);gl.uniform1i(loc.blurExtract,1);gl.uniform2f(loc.blurStep,5/w,0);gl.drawArrays(gl.TRIANGLES,0,3);
+    gl.bindFramebuffer(gl.FRAMEBUFFER,b.fbo);texture(0,a.tex);gl.uniform1i(loc.blurExtract,0);gl.uniform2f(loc.blurStep,0,5/a.h);gl.drawArrays(gl.TRIANGLES,0,3);
+    gl.useProgram(programs[2]);gl.bindFramebuffer(gl.FRAMEBUFFER,null);gl.viewport(0,0,w,h);texture(0,scene.tex);texture(1,b.tex);gl.uniform1i(loc.image,0);gl.uniform1i(loc.bloom,1);gl.drawArrays(gl.TRIANGLES,0,3);
+  }
+  function frame(timestamp){
+    raf=0;if(lost||stopped)return;
+    const now=timestamp/1000,dt=lastFrame?Math.min(.05,Math.max(0,(timestamp-lastFrame)/1000)):1/60;lastFrame=timestamp;
+    update(dt,now);render();raf=requestAnimationFrame(frame);
+  }
+  function cleanup(){
+    if(stopped)return;stopped=true;cancelAnimationFrame(raf);clearTimeout(reconnectTimer);observer.disconnect();window.removeEventListener('pagehide',cleanup);
+    if(socket){socket.onclose=null;socket.onmessage=null;socket.close();socket=null;}
+    if(!lost)freeGPU();
+  }
+  let observer;
+  try{initialize();observer=new ResizeObserver(()=>{if(!lost&&!stopped){try{resize();}catch(error){report('Graphics allocation failed',true);cleanup();}}});observer.observe(canvas);}
+  catch(error){freeGPU();report('Graphics initialization failed: '+error.message,true);return;}
+  canvas.addEventListener('webglcontextlost',event=>{event.preventDefault();lost=true;cancelAnimationFrame(raf);raf=0;report('Graphics context recovering',true);});
+  canvas.addEventListener('webglcontextrestored',()=>{if(stopped)return;try{initialize();lost=false;lastFrame=0;report('Graphics recovered');raf=requestAnimationFrame(frame);}catch(error){freeGPU();lost=false;report('Graphics recovery failed',true);cleanup();}});
+  window.addEventListener('pagehide',cleanup,{once:true});
+  if(!simulated)connect();raf=requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
