@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import random
 from typing import TYPE_CHECKING, Optional, Tuple
 
 from django.db import models, transaction
@@ -29,7 +28,7 @@ class SongQueue(models.Manager):
 
     @transaction.atomic
     def rebalance_priorities(self) -> None:
-        """Keep normal songs first and fairly round-robin overflow by requester."""
+        """Keep normal songs first and stably round-robin overflow by requester."""
         queue_lock.acquire()
         # Every enqueue may rewrite overflow positions. Lock queue rows in one
         # deterministic order to prevent cross-user submissions deadlocking.
@@ -38,8 +37,9 @@ class SongQueue(models.Manager):
         grouped = {}
         for song in self.filter(priority_tier="extra").order_by("id"):
             grouped.setdefault(song.requester_token or f"song:{song.id}", []).append(song)
+        # Preserve the order of each requester's oldest waiting extra. Repeated
+        # submissions/state updates must not randomly change the Auto Queue.
         requester_order = list(grouped)
-        random.shuffle(requester_order)
         extra = []
         while requester_order:
             next_round = []
@@ -70,7 +70,12 @@ class SongQueue(models.Manager):
         ).order_by("id").first()
         if overflow:
             overflow.priority_tier = "normal"
-            overflow.save(update_fields=["priority_tier"])
+            # Join behind the existing main queue even if a moderator previously
+            # reordered the Auto Queue. Voting/next-up ordering remains intact.
+            overflow.index = (
+                self.aggregate(last_index=models.Max("index"))["last_index"] or 0
+            ) + 1
+            overflow.save(update_fields=["priority_tier", "index"])
             self.rebalance_priorities()
 
     @transaction.atomic
@@ -79,14 +84,29 @@ class SongQueue(models.Manager):
         Confirmed songs are not in the process of being made available."""
         return self.exclude(internal_url=None)
 
+    def playable(self) -> QuerySet[QueuedSong]:
+        """Auto Queue songs must be promoted before any playback path selects them."""
+        return self.confirmed().filter(
+            priority_tier="normal", review_status__in=["clear", "approved"]
+        )
+
     @transaction.atomic
     def delete_placeholders(self) -> None:
         """Deletes all songs from the queue that are not confirmed."""
         queue_lock.acquire()
         from core import voting
+        affected_requesters = list(
+            self.filter(internal_url=None, priority_tier="normal")
+            .exclude(requester_token="")
+            .order_by()
+            .values_list("requester_token", flat=True)
+            .distinct()
+        )
         for occurrence in self.filter(internal_url=None).values_list("occurrence_id", flat=True):
             voting.retire(occurrence)
         self.filter(internal_url=None).delete()
+        for requester in affected_requesters:
+            self.promote_oldest_extra(requester)
         _snapshot_after_commit()
 
     @transaction.atomic
@@ -128,15 +148,15 @@ class SongQueue(models.Manager):
         from core import user_manager
         from core.musiq import next_up
 
-        eligible = self.confirmed().filter(review_status__in=["clear", "approved"])
+        eligible = self.playable()
         locked_key = next_up.get_locked_queue_key()
         if locked_key is not None:
             song = eligible.filter(id=locked_key).first()
             if song is None:
                 next_up.clear_locked_queue_key()
-                song = eligible.filter(priority_tier="normal").first() or eligible.first()
+                song = eligible.first()
         else:
-            song = eligible.filter(priority_tier="normal").first() or eligible.first()
+            song = eligible.first()
 
         if song is None:
             return -1, None
@@ -276,17 +296,6 @@ class SongQueue(models.Manager):
 
         to_reorder.index = new_index
         to_reorder.save()
-        _snapshot_after_commit()
-
-    @transaction.atomic
-    def shuffle(self) -> None:
-        """Assigns a random index to every song in the queue."""
-        queue_lock.acquire()
-        indices = list(range(1, self.count() + 1))
-        random.shuffle(indices)
-        for song, index in zip(self.all(), indices):
-            song.index = index
-            song.save()
         _snapshot_after_commit()
 
     @transaction.atomic
