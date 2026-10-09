@@ -104,6 +104,7 @@ class WindowsPlayer(player.Player):
         self.media_player = self.instance.media_player_new()
         self._last_state_check = 0.0
         self._last_stop_waiting = False
+        self._song_playback_observed = False
         _INSTANCE = self
 
     def _set_media(self, uri: str) -> None:
@@ -125,6 +126,7 @@ class WindowsPlayer(player.Player):
 
         self._last_state_check = 0.0
         self._last_stop_waiting = False
+        self._song_playback_observed = False
 
         try:
             self.media_player.stop()
@@ -153,6 +155,7 @@ class WindowsPlayer(player.Player):
         # give VLC a moment to start
         for _ in range(20):
             state = self.media_player.get_state()
+            self._song_playback_observed |= state in (vlc.State.Playing, vlc.State.Ended)
             if state not in (vlc.State.NothingSpecial, vlc.State.Opening):
                 break
             time.sleep(0.1)
@@ -166,6 +169,10 @@ class WindowsPlayer(player.Player):
         else:
             self.media_player.audio_set_mute(False)
 
+    def has_started_playback(self) -> bool:
+        """Cached evidence from existing polls; this never calls VLC."""
+        return self._song_playback_observed
+
     def should_stop_waiting(self, previous_error: bool) -> bool:
         # The playback loop calls this every 0.1s. Duration-based end detection
         # already handles normal completion, so throttle native state polling
@@ -178,6 +185,7 @@ class WindowsPlayer(player.Player):
 
         self._last_state_check = now
         state = self.media_player.get_state()
+        self._song_playback_observed |= state in (vlc.State.Playing, vlc.State.Ended)
         self._last_stop_waiting = state in (
             vlc.State.Ended,
             vlc.State.Stopped,
