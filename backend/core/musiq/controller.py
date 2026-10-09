@@ -198,12 +198,9 @@ def skip(_request: WSGIRequest) -> None:
 
 
 @control
-def set_shuffle(request: WSGIRequest) -> None:
-    """Enables or disables shuffle depending on the given value.
-    If enabled, a random song in the queue is chosen as the next one.
-    If not, the first one is chosen."""
-    enabled = request.POST.get("value") == "true"
-    storage.put("shuffle", enabled)
+def set_shuffle(_request: WSGIRequest) -> None:
+    """Keep the legacy endpoint safe for already-open clients: shuffle is retired."""
+    storage.put("shuffle", False)
 
 
 @control
@@ -252,10 +249,10 @@ def set_volume(request: WSGIRequest) -> HttpResponse:
 
 @control
 def shuffle_all(request: WSGIRequest) -> HttpResponse:
-    """Shuffles the queue. Only admin is permitted to do this."""
+    """Accept legacy admin requests without changing the fair queue order."""
     if not user_manager.is_admin(request.user):
         return HttpResponseForbidden()
-    playback.queue.shuffle()
+    storage.put("shuffle", False)
     return HttpResponse()
 
 
