@@ -48,7 +48,7 @@ def ordered_queue_queryset():
     if voting_enabled:
         natural_order = all_songs.annotate(
             effective_votes=Case(
-                When(votes__gte=1, then=F("votes")),
+                When(priority_tier="normal", votes__gte=1, then=F("votes")),
                 default=Value(1),
                 output_field=IntegerField(),
             )
@@ -58,6 +58,7 @@ def ordered_queue_queryset():
 
     locked_key = next_up.resolve_locked_queue_key(
         natural_order.filter(
+            priority_tier="normal",
             review_status__in=["clear", "approved"],
         ).exclude(internal_url=None).values_list("id", flat=True),
         allow_new_lock=CurrentSong.objects.exists(),
@@ -66,7 +67,7 @@ def ordered_queue_queryset():
     if voting_enabled:
         ordered = all_songs.annotate(
             effective_votes=Case(
-                When(votes__gte=1, then=F("votes")),
+                When(priority_tier="normal", votes__gte=1, then=F("votes")),
                 default=Value(1),
                 output_field=IntegerField(),
             )
@@ -505,7 +506,8 @@ def state_dict() -> Dict[str, Any]:
 
     musiq_state["siteMode"] = site_mode.get_mode()
     musiq_state["paused"] = storage.get("paused")
-    musiq_state["shuffle"] = storage.get("shuffle")
+    # Keep the state key for older clients, but ignore previously saved shuffle.
+    musiq_state["shuffle"] = False
     musiq_state["repeat"] = storage.get("repeat")
     musiq_state["autoplay"] = storage.get("autoplay")
     musiq_state["volume"] = storage.get("volume")
