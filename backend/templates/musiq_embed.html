@@ -2,6 +2,9 @@
 {% load static %}
 
 {% block js %}
+    if (new URLSearchParams(window.location.search).get('layout') === 'framed') {
+        document.documentElement.classList.add('furatic-framed');
+    }
     const ADDITIONAL_KEYWORDS = '{{ additional_keywords }}';
     const FORBIDDEN_KEYWORDS = '{{ forbidden_keywords }}';
     {% if client_streaming %}
@@ -1493,8 +1496,8 @@
     .furatic-icon-button:hover, .furatic-icon-button:focus-visible, .furatic-icon-button[aria-expanded="true"] { background: rgba(255,255,255,0.08); }
     .furatic-icon-button:active { transform: scale(0.94); }
     #current-song-card { margin-left: -8px; margin-right: -8px; }
-    #current-song.present { min-height: 112px; }
-    #current-song { padding: 10px 14px !important; gap: 6px 12px !important; display: grid !important; grid-template-columns: minmax(0, 1fr) auto; }
+    #current-song.present { min-height: 132px; }
+    #current-song { padding: 12px 14px !important; gap: 14px 12px !important; display: grid !important; grid-template-columns: minmax(0, 1fr) auto; grid-template-rows: minmax(60px, auto) auto; align-content: center; }
     #current-song .current-song-top-row { grid-column: 1; grid-row: 1; }
     #current-song #progress-bar-container { grid-column: 1; grid-row: 2; }
     #current-song #song-votes { grid-column: 2; grid-row: 1 / span 2; align-self: center; }
@@ -1528,7 +1531,7 @@
     .auto-queue-expanded-note { position: absolute; left: 12px; right: 12px; bottom: 15px; color: var(--furatic-muted); font-size: .8rem; opacity: 0; pointer-events: none; transition: opacity 220ms ease; margin: 0; }
     #auto-queue-dock.is-expanded #auto-queue-preview { opacity: 0; transform: translateY(6px); pointer-events: none; }
     #auto-queue-dock.is-expanded .auto-queue-expanded-note { opacity: 1; }
-    #auto-song-queue .vote-up, #auto-song-queue .vote-down, #history-song-queue .queue-info-controls { display: none !important; }
+    #auto-song-queue .queue-vote-cluster .vote-up, #auto-song-queue .queue-vote-cluster .vote-down, #history-song-queue .queue-info-controls { display: none !important; }
     #auto-song-queue .queue-vote-cluster { min-width: 2ch; }
     .vote-up[aria-disabled="true"], .vote-down[aria-disabled="true"] { opacity: .65; }
     #furatic-closing-banner { flex: 0 0 auto; overflow-y: auto; }
@@ -1539,7 +1542,17 @@
     #auto-queue-preview.is-empty { grid-template-columns: 1fr; align-items: center; min-height: 44px; }
     .ui-autocomplete { max-height: min(240px, 32vh); overflow-y: auto; }
     @media (max-width: 620px) { #current-song-card { margin-left: -6px; margin-right: -6px; } }
-    @media (max-height: 420px) { #music-input-card .clearable { min-height: 40px; } #current-song { padding-top: 8px !important; padding-bottom: 8px !important; } #current-song .current-song-artwork { width: 50px; height: 50px; flex-basis: 50px; } #furatic-closing-banner.is-visible { max-height: 70px; } #auto-queue-dock { flex-basis: 82px; min-height: 82px; } .auto-queue-thumbnail { height: 34px; } #current-song.present { min-height: 104px; } }
+    @media (max-height: 420px) { #music-input-card .clearable { min-height: 40px; } #current-song { padding-top: 10px !important; padding-bottom: 10px !important; grid-template-rows: minmax(50px, auto) auto; } #current-song .current-song-artwork { width: 50px; height: 50px; flex-basis: 50px; } #furatic-closing-banner.is-visible { max-height: 70px; } #auto-queue-dock { flex-basis: 82px; min-height: 82px; } .auto-queue-thumbnail { height: 34px; } #current-song.present { min-height: 120px; } }
+    /* Match the parent's transparent 20px gutters without widening its surface
+       or moving Search, the ordinary queue and Auto Queue from their old edges. */
+    html.furatic-framed .furatic-embed-shell { padding-left: 30px; padding-right: 30px; }
+    html.furatic-framed #current-song-card { margin-left: -18px; margin-right: -18px; }
+    @media (max-width: 660px) {
+        html.furatic-framed .furatic-embed-shell { padding: 6px 28px 14px; }
+        html.furatic-framed .list-group-item { border-radius: 16px !important; }
+        html.furatic-framed #current-song-card { margin-left: -16px; margin-right: -16px; }
+    }
+    @media (max-width: 460px) { html.furatic-framed #current-song-card { margin-left: -14px; margin-right: -14px; } }
     @media (prefers-reduced-motion: reduce) { #auto-queue-toggle > i, #auto-queue-preview, .auto-queue-expanded-note, .furatic-icon-button, .auto-queue-thumbnail { transition: none; } }
 
 </style>
