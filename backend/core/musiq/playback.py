@@ -187,9 +187,17 @@ class Playback:
             except Exception:  # pylint: disable=broad-except
                 pass
 
-            models.CurrentSong.objects.all().delete()
-            user_manager.clear_queue_slots()
-            queue.all().delete()
+            from core import queue_lock, played_history, voting
+            with transaction.atomic():
+                queue_lock.acquire()
+                for current in models.CurrentSong.objects.all():
+                    played_history.record_finished(current, outcome="cleared")
+                    voting.retire(current.occurrence_id)
+                for occurrence in queue.values_list("occurrence_id", flat=True):
+                    voting.retire(occurrence)
+                models.CurrentSong.objects.all().delete()
+                user_manager.clear_queue_slots()
+                queue.all().delete()
 
             storage.put("paused", False)
             redis.put("paused", False)
@@ -255,60 +263,58 @@ class Playback:
             # in case of a false wakeup this causes as to wait again
             return None, False
 
-        # select the next song depending on settings
-        song: Optional[models.QueuedSong]
-        if storage.get("interactivity") in [
-            storage.Interactivity.upvotes_only,
-            storage.Interactivity.full_voting,
-        ]:
-            with transaction.atomic():
+        # Handoff and voting share a short DB lock. No promotion or file/native
+        # work runs while a primary song is moving from queued to current.
+        from core import queue_lock
+        with transaction.atomic():
+            queue_lock.acquire()
+            existing = models.CurrentSong.objects.first()
+            if existing is not None:
+                return existing, True
+            song = None
+            song_id = -1
+            if storage.get("interactivity") in [
+                storage.Interactivity.upvotes_only,
+                storage.Interactivity.full_voting,
+            ]:
                 song = _ordered_confirmed_queue().first()
-                if song is None:
-                    queue_changed.wait()
-                    queue_changed.clear()
-                    return None, False
-                song_id = song.id
-                queue.remove(song.id, snapshot=False)
-        elif storage.get("shuffle"):
-            confirmed = queue.confirmed()
-            index = random.randint(0, confirmed.count() - 1)
-            song_id = confirmed[index].id
-            song = queue.remove(song_id, snapshot=False)
-        else:
-            # move the first song in the queue into the current song
-            song_id, song = queue.dequeue()
-
+                if song is not None:
+                    song_id = song.id
+                    song = queue.remove(song_id, snapshot=False, transfer=True)
+            elif storage.get("shuffle"):
+                confirmed = list(queue.confirmed())
+                if confirmed:
+                    song_id = random.choice(confirmed).id
+                    song = queue.remove(song_id, snapshot=False, transfer=True)
+            else:
+                song_id, song = queue.dequeue()
+            if song is not None and song.internal_url != "alarm":
+                current_song = models.CurrentSong.objects.create(
+                    queue_key=song_id,
+                    occurrence_id=song.occurrence_id,
+                    manually_requested=song.manually_requested,
+                    votes=song.votes,
+                    internal_url=song.internal_url,
+                    external_url=song.external_url,
+                    stream_url=song.stream_url,
+                    artist=song.artist,
+                    title=song.title,
+                    duration=song.duration,
+                    requester_ip=song.requester_ip,
+                    requester_session_key=song.requester_session_key,
+                    requester_token=song.requester_token,
+                    artwork_url=song.artwork_url,
+                    genre=song.genre,
+                )
         if song is None:
-            # either the semaphore didn't match up with the actual count
-            # of songs in the queue or a race condition occured
-            logging.warning("dequeued on empty list")
+            queue_changed.wait()
+            queue_changed.clear()
             return None, False
-
         if song.internal_url == "alarm":
             self.play_alarm()
             return None, False
-
-        # stop backup stream.
-        # when the dequeued song starts playing, the backup stream playback is stopped
         redis.put("backup_playing", False)
-
         assert song.internal_url
-        current_song = models.CurrentSong.objects.create(
-            queue_key=song_id,
-            manually_requested=song.manually_requested,
-            votes=song.votes,
-            internal_url=song.internal_url,
-            external_url=song.external_url,
-            stream_url=song.stream_url,
-            artist=song.artist,
-            title=song.title,
-            duration=song.duration,
-            requester_ip=song.requester_ip,
-            requester_session_key=song.requester_session_key,
-            requester_token=song.requester_token,
-            artwork_url=song.artwork_url,
-            genre=song.genre,
-        )
         cover_source = (
             Path(conf.FURATIC_OBS_OUTPUT_DIR).expanduser()
             / "artwork"
@@ -438,6 +444,10 @@ class Playback:
         except CurrentSong.DoesNotExist:
             return False
 
+        from core import played_history
+        if not redis.get("paused") and self.player().has_started_playback():
+            played_history.mark_started(starting_song)
+
         effective_duration = audio_tail.effective_duration_for_song(starting_song)
         original_duration = float(starting_song.duration or 0.0)
         trim_tail = effective_duration < (original_duration - 0.25)
@@ -460,12 +470,16 @@ class Playback:
                 return False
 
             current_song = CurrentSong.objects.get()
+            paused = redis.get("paused")
+            stop_waiting = False
             try:
-                if self.player().should_stop_waiting(error):
-                    break
+                stop_waiting = self.player().should_stop_waiting(error)
             except PlaybackError:
                 error = True
-            paused = redis.get("paused")
+            if starting_song.playback_started_at is None and not paused and self.player().has_started_playback():
+                played_history.mark_started(starting_song)
+            if stop_waiting:
+                break
             if paused:
                 # stay in the loop, the song won't end while paused
                 # progress = (current_song.last_paused - current_song.created).total_seconds()
@@ -514,7 +528,7 @@ class Playback:
                 current_song.created += datetime.timedelta(
                     seconds=redis.get("alarm_duration")
                 )
-                current_song.save()
+                current_song.save(update_fields=["created"])
                 playback_state_backup.snapshot()
 
                 return False
@@ -602,6 +616,9 @@ class Playback:
                     musiq.update_state()
                     continue
                 redis.put("playing", True)
+                if not redis.get("paused") and self.player().has_started_playback():
+                    from core import played_history
+                    played_history.mark_started(current_song)
 
                 musiq.update_state()
                 if not self._wait_until_song_end():
@@ -619,9 +636,17 @@ class Playback:
             redis.put("paused", False)
             redis.put("playing", False)
 
-            current_song.delete()
-
-            queue.promote_oldest_extra(current_song.requester_token)
+            from core import queue_lock
+            with transaction.atomic():
+                queue_lock.acquire()
+                latest = models.CurrentSong.objects.filter(pk=current_song.pk).first()
+                if latest is not None:
+                    current_song = latest
+                    from core import played_history, voting
+                    played_history.record_finished(latest)
+                    voting.retire(latest.occurrence_id)
+                    latest.delete()
+                queue.promote_oldest_extra(current_song.requester_token)
 
             self._song_finished(current_song)
             playback_state_backup.snapshot()
