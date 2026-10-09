@@ -337,6 +337,8 @@ def request_music(request: WSGIRequest) -> HttpResponse:
     with transaction.atomic():
         # Serialize ownership assignment after placeholder creation; worker
         # threads must never be asked to use an uncommitted queue row.
+        from core import queue_lock
+        queue_lock.acquire()
         from core.models import ClientIdentity  # pylint: disable=import-outside-toplevel
 
         ClientIdentity.objects.select_for_update().get(pk=identity.pk)
@@ -363,6 +365,9 @@ def request_music(request: WSGIRequest) -> HttpResponse:
             requester_token=requester_token,
             priority_tier="extra" if has_primary else "normal",
         )
+        queued_song.refresh_from_db()
+        from core import voting
+        voting.seed_requester_vote(request, queued_song)
         queue.rebalance_priorities()
 
     user_manager.remember_requester_ip(
@@ -508,6 +513,7 @@ def state_dict() -> Dict[str, Any]:
     try:
         current_song = CurrentSong.objects.get()
         current_song_dict = model_to_dict(current_song)
+        current_song_dict["occurrence_id"] = str(current_song.occurrence_id)
         current_song_dict = util.camelize(current_song_dict)
 
         original_duration = float(current_song.duration or 0.0)
@@ -565,6 +571,7 @@ def state_dict() -> Dict[str, Any]:
     locked_queue_key = next_up.get_locked_queue_key()
     for song in ordered_queue_queryset():
         song_dict = model_to_dict(song)
+        song_dict["occurrence_id"] = str(song.occurrence_id)
         song_dict = util.camelize(song_dict)
         song_dict["isNextUpLocked"] = locked_queue_key is not None and song.id == locked_queue_key
         song_dict["durationFormatted"] = song_utils.format_seconds(
