@@ -42,7 +42,8 @@ class Capture:
         now = time.monotonic()
         stale = now - frame["capturedAt"] > .30
         if stale:
-            for name in ["level", "bass", "mid", "treble", "activity", "kick", "accent"]:
+            for name in ["level", "bass", "mid", "treble", "activity", "kick", "accent",
+                         "rhythmConfidence", "rhythmTempo", "rhythmDrive"]:
                 frame[name] = 0.0
             frame["bands"] = [0.0] * 48
             frame["rms"] = [0.0, 0.0]
@@ -179,3 +180,4 @@ class Capture:
                     process.kill()
                     process.wait(timeout=2)
             process.stdout.close()
+
