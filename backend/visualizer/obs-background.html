@@ -51,7 +51,18 @@ canvas{display:block;width:100%;height:100%}
   out vec4 fragColor;
   float hash(vec2 p){vec3 p3=fract(vec3(p.xyx)*.1031);p3+=dot(p3,p3.yzx+33.33);return fract((p3.x+p3.y)*p3.z);}
   float noise(vec2 p){vec2 i=floor(p),f=fract(p);f=f*f*(3.-2.*f);return mix(mix(hash(i),hash(i+vec2(1,0)),f.x),mix(hash(i+vec2(0,1)),hash(i+1.),f.x),f.y);}
-  float fbm(vec2 p){float n=0.,a=.53;for(int i=0;i<4;i++){n+=a*noise(p);p=mat2(.8,.6,-.6,.8)*p*2.03+13.7;a*=.5;}return n;}
+  float fbm(vec2 p){
+    float n=0.,a=.53;
+    // Fade unresolved octaves toward their mean instead of letting tiny paint
+    // details shimmer as a moving cloud crosses pixels (including at 720p).
+    float footprint=max(length(dFdx(p)),length(dFdy(p)));
+    for(int i=0;i<4;i++){
+      float resolved=1.-smoothstep(.35,.85,footprint);
+      n+=a*mix(.5,noise(p),resolved);
+      p=mat2(.8,.6,-.6,.8)*p*2.03+13.7;footprint*=2.03;a*=.5;
+    }
+    return n;
+  }
   vec3 pigment(int i){
     if(i==0)return pow(vec3(0.,142.,248.)/255.,vec3(2.2));
     if(i==1)return pow(vec3(182.,72.,196.)/255.,vec3(2.2));
@@ -74,22 +85,22 @@ canvas{display:block;width:100%;height:100%}
       scores[i]=-dot(broad,broad)*3.8;
       largestScore=max(largestScore,scores[i]);
     }
-    float first=0.,second=0.;
+    float purity=0.;
     for(int i=0;i<4;i++){
-      ownership[i]=exp(scores[i]-largestScore);
-      second=max(second,min(first,ownership[i]));first=max(first,ownership[i]);
-    }
-    // Only shared edges receive a broader feather and slower color handoff.
-    // A cloud's clear interior retains its original fast musical lighting.
-    float overlap=smoothstep(.16,.80,second/max(first,.000001));
-    for(int i=0;i<4;i++){
-      ownership[i]=exp((scores[i]-largestScore)*mix(1.,.86,overlap));
+      ownership[i]=exp((scores[i]-largestScore)*.92);
       total+=ownership[i];
     }
+    for(int i=0;i<4;i++){
+      ownership[i]/=total;purity+=ownership[i]*ownership[i];
+    }
+    // Symmetric mixing confidence has no first/second-cloud ranking handoff.
+    // Slow the shared color region; keep measured attacks quick in clear cores.
+    float overlap=smoothstep(.10,.48,1.-purity);
     vec3 col=vec3(.003,.008,.026);
     for(int i=0;i<4;i++){
-      ownership[i]/=total;
-      vec2 p=local[i]+vec2(float(i)*7.3,float(i)*4.1);
+      // Paint travels with its cloud, but does not stretch/reseed when musical
+      // energy changes its footprint. Shape and texture motion are independent.
+      vec2 p=local[i]*u_sizes[i]/.94+vec2(float(i)*7.3,float(i)*4.1);
       float mist=fbm(p*2.9+u_motion.xy*1.7);
       float grain=fbm(vec2(p.x*8.1,p.y*13.2)+u_motion.zw*.8);
       float pigmentDepth=.06+1.6*pow(smoothstep(.20,.77,mist),2.);
@@ -149,7 +160,7 @@ canvas{display:block;width:100%;height:100%}
   let gpuFence=null,resizePending=true,nextRender=0,rendered=0,gpuSkipped=0;
   let obsVisible=true,visible=!document.hidden;
   let socket=null,reconnectTimer=0,retry=500,lastReceived=-Infinity,lastIds=null,connectionOpened=0;
-  let lastFrame=0,flowClock=0,simPhase=0,activity=0,driftActivity=0,driftLevel=0,desiredRhythm=0,driftRhythm=0;
+  let lastFrame=0,flowClock=0,simPhase=0,activity=0,driftActivity=0,driftLevel=0,desiredRhythm=0,driftRhythm=0,phraseLevel=0;
   const bands=new Float32Array(48),music=new Float32Array(4),desiredBands=new Float32Array(48),desiredMusic=new Float32Array(4);
   const clouds=new Float32Array(16),motion=new Float32Array(4),lightEnergy=new Float32Array(4);
   const lights=Array.from({length:LIGHT_COUNT},()=>({born:-100,cloud:0,strength:0}));
@@ -157,6 +168,9 @@ canvas{display:block;width:100%;height:100%}
   // Fixed animation state: retarget from the current position AND velocity.
   // Beats may flash quickly; the gas volume itself has gentle, bounded inertia.
   const sizeTargets=new Float64Array([.94,.94,.94,.94]),sizeVelocity=new Float64Array(4);
+  // Fixed, causal phrase envelopes: rapid harmonics/hi-hats drive light, while
+  // sustained spectral emphasis drives physical size and neighbor displacement.
+  const phraseEnergy=new Float64Array(4),phraseBalance=new Float64Array(4),cloudMass=new Float64Array(4);
   const lightTargets=new Float32Array(4),lightVelocity=new Float64Array(4);
   // Boundary lighting has its own fixed, continuous-velocity animation state.
   // No history textures or framebuffer feedback are needed for the crossfade.
@@ -317,6 +331,7 @@ canvas{display:block;width:100%;height:100%}
     driftActivity+=(activity-driftActivity)*(1-Math.exp(-dt/.60));
     driftLevel+=(music[0]-driftLevel)*(1-Math.exp(-dt/.60));
     driftRhythm+=(desiredRhythm-driftRhythm)*(1-Math.exp(-dt/1.2));
+    phraseLevel+=(desiredMusic[0]-phraseLevel)*(1-Math.exp(-dt/(desiredMusic[0]>phraseLevel?.45:.85)));
     // Preserve quiet-passage travel. Bounded rhythm context adds a modest boost
     // only during louder phrases, eased over 1.2 s. Velocity inertia stays intact.
     const loud=clamp((driftLevel-.40)/.50),intensity=loud*loud*(3-2*loud);
@@ -332,39 +347,65 @@ canvas{display:block;width:100%;height:100%}
       lightTargets[light.cloud]+=attack*(Math.exp(-age/.23)+.16*Math.exp(-age/.75))*(1-fade*fade*(3-2*fade))*light.strength;
       pulse[light.cloud]+=attack*Math.exp(-age/.32)*light.strength;
     }
+    let balanceSum=0;
+    for(let i=0;i<4;i++){
+      phraseEnergy[i]+=(desiredEnergy[i]-phraseEnergy[i])*(1-Math.exp(-dt/(desiredEnergy[i]>phraseEnergy[i]?.45:.85)));
+      phraseBalance[i]+=(desiredBalance[i]-phraseBalance[i])*(1-Math.exp(-dt/.75));
+      balanceSum+=phraseBalance[i];
+    }
+    let meanMass=0;
     for(let i=0;i<4;i++){
       energy[i]+=(desiredEnergy[i]-energy[i])*(1-Math.exp(-dt/(desiredEnergy[i]>energy[i]?.035:.30)));
       balance[i]+=(desiredBalance[i]-balance[i])*(1-Math.exp(-dt/.38));
-      const targetSize=.84+.18*energy[i]+.38*music[0]*Math.sqrt(balance[i])+.10*Math.min(1,pulse[i]);
-      // Follow the musical phrase without stretching the fine paint on every
-      // rapid hit. Targets evolve; existing size/velocity are never restarted.
-      sizeTargets[i]+=(targetSize-sizeTargets[i])*(1-Math.exp(-dt/.18));
-      settle(sizes,sizeVelocity,i,sizeTargets[i],8,dt,.24,.90);
+      const share=phraseBalance[i]/Math.max(.0001,balanceSum);
+      cloudMass[i]=phraseLevel*Math.sqrt(share);
+      meanMass+=cloudMass[i]*.25;
+      const targetSize=.84+.18*phraseEnergy[i]+.38*cloudMass[i];
+      // The gas follows a phrase, not every transient. Bound both size speed
+      // and acceleration; retargeting never resets existing position/velocity.
+      sizeTargets[i]+=(targetSize-sizeTargets[i])*(1-Math.exp(-dt/.30));
+      settle(sizes,sizeVelocity,i,sizeTargets[i],5,dt,.10,.30);
       // Smooth late/irregular packet handoffs, with a short response so the
       // lighting still marks the beat rather than sharing the slower geometry.
-      settle(lightEnergy,lightVelocity,i,lightTargets[i],70,dt);
+      // A bounded, monotonic soft knee preserves attack timing but prevents
+      // many overlapping decays from turning a dense mix into competing blasts.
+      const light=lightTargets[i]/Math.sqrt(1+(lightTargets[i]/1.35)**2);
+      settle(lightEnergy,lightVelocity,i,light,70,dt);
       // Shared colors evolve on a phrase-scale envelope, independently of the
       // quick core pulse. Retargeting preserves velocity through dense rhythms.
-      settle(edgeEnergy,edgeEnergyVelocity,i,energy[i],12,dt);
-      settle(edgeLights,edgeLightVelocity,i,lightEnergy[i],14,dt);
-      settle(edgeMusic,edgeMusicVelocity,i,music[i],12,dt);
+      settle(edgeEnergy,edgeEnergyVelocity,i,phraseEnergy[i],7,dt);
+      settle(edgeLights,edgeLightVelocity,i,lightEnergy[i],6,dt);
+      settle(edgeMusic,edgeMusicVelocity,i,music[i],7,dt);
     }
-    for(let i=0;i<48;i++)settle(edgeBands,edgeBandVelocity,i,bands[i],12,dt);
+    for(let i=0;i<48;i++)settle(edgeBands,edgeBandVelocity,i,bands[i],7,dt);
     for(let i=0;i<4;i++){
       const c=cloudStates[i],px=c.x*Math.PI,py=c.y*Math.PI;
       const phase=cloudPathPhases[i];
       const tx=.5+.32*Math.cos(flowClock*.013+phase)+.07*Math.sin(flowClock*.031+i*1.7);
       const ty=.5+.32*Math.sin(flowClock*.017+phase)+.07*Math.cos(flowClock*.029+i*1.9);
-      let fx=(tx-c.x)*5+.30*Math.sin(px+flowClock*.012)*Math.cos(py+flowClock*.017);
-      let fy=(ty-c.y)*5-.30*Math.cos(px+flowClock*.012)*Math.sin(py+flowClock*.017);
+      const pathPull=5+1.5*cloudMass[i];
+      let fx=(tx-c.x)*pathPull+.30*Math.sin(px+flowClock*.012)*Math.cos(py+flowClock*.017);
+      let fy=(ty-c.y)*pathPull-.30*Math.cos(px+flowClock*.012)*Math.sin(py+flowClock*.017);
       fx+=Math.max(0,.14-c.x)*28-Math.max(0,c.x-.86)*28;
       fy+=Math.max(0,.14-c.y)*28-Math.max(0,c.y-.86)*28;
-      for(let j=0;j<4;j++)if(i!==j){const other=cloudStates[j],dx=c.x-other.x,dy=c.y-other.y,d=Math.hypot(dx,dy);const push=Math.max(0,.42-d)*18/Math.max(.04,d);fx+=dx*push;fy+=dy*push;}
+      for(let j=0;j<4;j++)if(i!==j){
+        const other=cloudStates[j],dx=c.x-other.x,dy=c.y-other.y,d=Math.hypot(dx,dy);
+        // A sustained dominant cloud yields less and gently moves its weaker
+        // neighbors. Same audio gives the same relative emphasis, even when
+        // the ongoing procedural path starts in a different part of the screen.
+        const separation=.42+.045*Math.max(cloudMass[i],cloudMass[j]);
+        const mobility=Math.max(.55,Math.min(1.65,1+1.1*(cloudMass[j]-cloudMass[i])));
+        const push=Math.max(0,separation-d)*18*mobility/Math.max(.04,d);
+        fx+=dx*push;fy+=dy*push;
+      }
       const length=Math.max(1,Math.hypot(fx,fy));flowForces[i*2]=fx/length;flowForces[i*2+1]=fy/length;
     }
     for(let i=0;i<4;i++){
       const c=cloudStates[i],ease=1-Math.exp(-dt/3.5);
-      c.vx+=(flowForces[i*2]*.0052*speed-c.vx)*ease;c.vy+=(flowForces[i*2+1]*.0052*speed-c.vy)*ease;
+      // Retain spectral inertia even when a crowded pair saturates the force
+      // limit. Equal dominance/silence keeps the original travel response.
+      const response=1+.32*(meanMass-cloudMass[i]);
+      c.vx+=(flowForces[i*2]*.0052*speed*response-c.vx)*ease;c.vy+=(flowForces[i*2+1]*.0052*speed*response-c.vy)*ease;
       c.x+=c.vx*dt;c.y+=c.vy*dt;
       c.angle+=(-.08+.16*Math.sin(flowClock*.012+i*1.9)+c.vy*10-c.angle)*(1-Math.exp(-dt/4));
       clouds[i*4]=c.x;clouds[i*4+1]=c.y;clouds[i*4+2]=Math.cos(c.angle);clouds[i*4+3]=Math.sin(c.angle);
@@ -427,4 +468,5 @@ canvas{display:block;width:100%;height:100%}
 </script>
 </body>
 </html>
+
 
