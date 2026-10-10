@@ -13,7 +13,7 @@ AVAILABLE = all(importlib.util.find_spec(m) is not None for m in ("numpy", "aioh
 if AVAILABLE:
     import numpy as np
     from aiohttp import ClientSession, WSServerHandshakeError, web
-    from visualizer.dsp import Analyzer, empty_frame
+    from visualizer.dsp import Analyzer, RhythmContext, empty_frame
     from visualizer.capture import Capture
     from visualizer.service import create_app
     from visualizer.service import ParentGuard
@@ -141,6 +141,7 @@ class SignalTests(unittest.TestCase):
         frame = empty_frame()
         frame["cloudIds"] = [1, 2, 3, 4]
         frame["cloudLevels"] = [.7] * 4
+        frame.update(rhythmDrive=.8, rhythmConfidence=.9, rhythmTempo=120)
         capture._publish(frame)
         capture._publish(frame)
         self.assertEqual(capture.frame["cloudIds"], [11, 22, 33, 44])
@@ -151,6 +152,9 @@ class SignalTests(unittest.TestCase):
             self.assertEqual(snapshot[name], [0.0] * 4)
         self.assertEqual(capture.frame["cloudLevels"], [.7] * 4)
         self.assertEqual(snapshot["cloudIds"], [11, 22, 33, 44])
+        for name in ("rhythmDrive", "rhythmConfidence", "rhythmTempo"):
+            self.assertEqual(snapshot[name], 0)
+        self.assertEqual(capture.frame["rhythmTempo"], 120)
 
     def test_formats_and_corrupt_samples_remain_finite_and_bounded(self):
         for rate, channels in ((44100, 2), (48000, 1), (8000, 2), (192000, 8)):
@@ -160,6 +164,116 @@ class SignalTests(unittest.TestCase):
             frame = analyzer.feed(data.tobytes(), 100)
             self.assertTrue(all(math.isfinite(v) for v in frame["cloudLevels"]))
             self.assertEqual(analyzer.samples.shape, (2048, channels))
+
+    def test_wider_vocal_vibrato_remains_continuous_not_a_strobe(self):
+        def vocal(t):
+            phase = math.tau * (247 * t - 8 / (math.tau * 6.1) * np.cos(t * math.tau * 6.1))
+            return sum(a * np.sin(phase * k) for k, a in ((1,.11),(2,.06),(4,.08),(7,.035),(13,.015),(20,.008)))
+        analyzer, frames = self.passage(vocal, seconds=10)
+        self.assertLessEqual(max(analyzer.frame["cloudIds"]), 2)
+        self.assertEqual(analyzer.frame["rhythmTempo"], 0)
+        self.assertGreater(max(f["cloudLevels"][1] for f in frames), .6)
+
+    def test_sung_envelope_does_not_trigger_faster_than_its_phrasing(self):
+        def vocal(t):
+            phase = math.tau * (247 * t - 8 / (math.tau * 6.1) * np.cos(t * math.tau * 6.1))
+            harmonics = sum(a * np.sin(phase * k) for k,a in ((1,.11),(2,.06),(4,.08),(7,.035),(13,.015),(20,.008)))
+            return harmonics * (.55 + .4 * np.sin(t * math.tau * 1.7) ** 2)
+        analyzer, frames = self.passage(vocal, seconds=8)
+        # The 3.4 Hz energy phrasing, not its 6.1 Hz pitch vibrato, supplies
+        # the attacks. Harmonics sharing an attack receive one coherent cue.
+        self.assertEqual(analyzer.frame["cloudIds"][0], 0)
+        self.assertLessEqual(max(analyzer.frame["cloudIds"]), 29)
+        at = [f["cloudAt"][1] for f in frames if f["cloudAt"][1]]
+        events = np.unique(at)
+        if len(events) > 4:
+            self.assertGreater(float(np.median(np.diff(events))), .26)
+
+    def test_dense_vocal_mix_keeps_steady_kicks_in_sync(self):
+        def mix(t):
+            phase = math.tau * (247 * t - 8 / (math.tau * 6.1) * np.cos(t * math.tau * 6.1))
+            vocal = sum(a * np.sin(phase * k) for k,a in ((1,.11),(2,.06),(4,.08),(7,.035),(13,.015)))
+            vocal *= .55 + .4 * np.sin(t * math.tau * 1.7) ** 2
+            p = t % .5
+            kick = .23 * np.sin(t * math.tau * 75) * (1 - np.exp(-p/.002)) * np.exp(-p/.045)
+            pad = .08 * np.sin(t * math.tau * 85) + .07 * np.sin(t * math.tau * 370)
+            return np.tanh(2 * (vocal + kick + pad)) * .4
+        analyzer, frames = self.passage(mix, seconds=10)
+        times = np.unique([f["cloudAt"][0] - 100 for f in frames if f["cloudAt"][0]])
+        beats = np.arange(.5, 9.9, .5)
+        aligned = sum(np.min(abs(times - beat)) < .09 for beat in beats)
+        self.assertGreaterEqual(aligned, len(beats) - 2)
+        self.assertLessEqual(len(times), 24)
+        self.assertGreater(analyzer.frame["rhythmConfidence"], .4)
+
+    def test_silence_does_not_continue_a_learned_rhythm(self):
+        def passage(t):
+            p = t % .5
+            wave = .4 * np.sin(t * math.tau * 80) * (1 - np.exp(-p/.002)) * np.exp(-p/.045)
+            return np.where(t < 6, wave, 0)
+        analyzer, frames = self.passage(passage, seconds=9)
+        before = next(f for f in frames if f["capturedAt"] > 106.3)
+        self.assertEqual(before["cloudIds"], analyzer.frame["cloudIds"])
+        self.assertEqual(analyzer.frame["rhythmConfidence"], 0)
+        self.assertEqual(analyzer.frame["rhythmDrive"], 0)
+
+    def test_rhythm_history_is_fixed_and_recovers_from_clock_gaps(self):
+        rhythm = RhythmContext()
+        history = rhythm.history
+        for i in range(4000):
+            novelty = np.array([.65 if i % 25 == 0 else 0, 0, 0, 0])
+            rhythm.observe(novelty, 100 + i / 50)
+        self.assertIs(rhythm.history, history)
+        self.assertEqual(history.shape, (400, 4))
+        self.assertEqual(history.nbytes, 6400)
+        self.assertEqual(rhythm.count, 400)
+        self.assertGreater(rhythm.confidence, .4)
+        self.assertAlmostEqual(rhythm.period, .5, delta=.025)
+        rhythm.observe(np.zeros(4), 190)
+        self.assertEqual(rhythm.confidence, 0)
+        self.assertLess(rhythm.count, 3)
+        rhythm.observe(np.zeros(4), 189)  # clock reversal must also rebase
+        self.assertEqual(rhythm.confidence, 0)
+        self.assertLess(rhythm.count, 3)
+
+    def test_plucked_and_soft_harmonic_attacks_follow_notes(self):
+        # Analytic instrument-like envelopes, not recorded piano/guitar/brass.
+        # They exercise the important difference between a sharp pluck and a
+        # softer harmonic attack without adding audio assets or dependencies.
+        for attack, decay in ((.005,.45), (.012,.22), (.090,.65)):
+            def phrase(t):
+                p = t % 1.0
+                env = (1 - np.exp(-p / attack)) * np.exp(-p / decay)
+                pitch = np.take([261.63,329.63,392,293.66], np.floor(t).astype(int) % 4)
+                phase = math.tau * pitch * t + .03 * np.sin(t * math.tau * 5)
+                return .20 * env * sum(np.sin(phase * k) / k ** 1.4 for k in range(1,7))
+            analyzer, frames = self.passage(phrase, seconds=8)
+            self.assertGreaterEqual(max(analyzer.frame["cloudIds"]), 6)
+            self.assertLessEqual(max(analyzer.frame["cloudIds"]), 12)
+            actual = np.unique([at - 100 for f in frames for at in f["cloudAt"] if at])
+            for note in range(1,8):
+                self.assertLess(float(np.min(abs(actual - note))), .22)
+
+    def test_legato_timbre_shapes_energy_without_random_flashes(self):
+        def phrase(t):
+            blend = .5 + .45 * np.sin(t * .55)
+            return (.12 * np.sin(t * math.tau * 330)
+                    + .10 * blend * np.sin(t * math.tau * 1320)
+                    + .10 * (1 - blend) * np.sin(t * math.tau * 3960))
+        analyzer, frames = self.passage(phrase, seconds=10)
+        self.assertLessEqual(max(analyzer.frame["cloudIds"]), 3)
+        self.assertGreater(np.ptp([f["cloudLevels"][3] for f in frames]), .2)
+
+    def test_strong_syncopation_is_not_forced_onto_the_learned_grid(self):
+        notes = np.array([.0,.5,1,1.5,2,2.5,3,3.5,4,4.25,4.75,5.25,6,6.5,6.75,7.5])
+        def phrase(t):
+            age = t[:, None] - notes
+            env = np.where(age >= 0, (1 - np.exp(-np.maximum(0,age)/.003)) * np.exp(-np.maximum(0,age)/.050), 0).sum(axis=1)
+            return .25 * np.sin(t * math.tau * 1000) * env
+        analyzer, frames = self.passage(phrase, seconds=8)
+        actual = np.unique([f["cloudAt"][1] - 100 for f in frames if f["cloudAt"][1]])
+        self.assertGreaterEqual(sum(np.min(abs(actual - note)) < .09 for note in notes), len(notes) - 2)
+        self.assertLessEqual(analyzer.frame["cloudIds"][1], len(notes) + 1)
 
 
 @unittest.skipUnless(AVAILABLE, "Install the optional visualizer extra")
@@ -330,3 +444,4 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
