@@ -44,6 +44,10 @@ canvas{display:block;width:100%;height:100%}
   uniform vec4 u_sizes;
   uniform float u_bands[48];
   uniform vec4 u_lights;
+  uniform vec4 u_edgeEnergy;
+  uniform vec4 u_edgeLights;
+  uniform vec4 u_edgeMusic;
+  uniform float u_edgeBands[48];
   out vec4 fragColor;
   float hash(vec2 p){vec3 p3=fract(vec3(p.xyx)*.1031);p3+=dot(p3,p3.yzx+33.33);return fract((p3.x+p3.y)*p3.z);}
   float noise(vec2 p){vec2 i=floor(p),f=fract(p);f=f*f*(3.-2.*f);return mix(mix(hash(i),hash(i+vec2(1,0)),f.x),mix(hash(i+vec2(0,1)),hash(i+1.),f.x),f.y);}
@@ -54,24 +58,37 @@ canvas{display:block;width:100%;height:100%}
     if(i==2)return pow(vec3(213.,107.,12.)/255.,vec3(2.2));
     return pow(vec3(52.,217.,0.)/255.,vec3(2.2));
   }
-  float spectrum(float k){k=clamp(k,0.,47.);int i=int(floor(k));return mix(u_bands[i],u_bands[min(i+1,47)],fract(k));}
+  float spectrum(float k,float overlap){k=clamp(k,0.,47.);int i=int(floor(k)),j=min(i+1,47);float live=mix(u_bands[i],u_bands[j],fract(k));float edge=mix(u_edgeBands[i],u_edgeBands[j],fract(k));return mix(live,edge,overlap);}
   float spot(vec2 p,vec2 centre,vec2 spread){vec2 d=(p-centre)/spread;return exp(-dot(d,d));}
   void main(){
     vec2 uv=v_uv;float aspect=u_resolution.x/u_resolution.y;
     vec2 local[4];float ownership[4];float density[4];float detail[4];float sheen[4];float ray[4];
-    float total=0.;
-    // A soft partition keeps each colored volume distinct as it travels.
+    float scores[4];float largestScore=-1e20,total=0.;
+    // Normalize relative Gaussian scores. This stays well conditioned even
+    // when all four volumes are far from a pixel; no absolute cutoff boundary.
     for(int i=0;i<4;i++){
       vec2 d=(uv-u_clouds[i].xy)*vec2(aspect,1.);
       vec2 axis=u_clouds[i].zw;
       local[i]=vec2(dot(d,axis),dot(d,vec2(-axis.y,axis.x)))/u_sizes[i];
       vec2 broad=local[i]/vec2(.69,.53);
-      ownership[i]=exp(-dot(broad,broad)*3.8);
+      scores[i]=-dot(broad,broad)*3.8;
+      largestScore=max(largestScore,scores[i]);
+    }
+    float first=0.,second=0.;
+    for(int i=0;i<4;i++){
+      ownership[i]=exp(scores[i]-largestScore);
+      second=max(second,min(first,ownership[i]));first=max(first,ownership[i]);
+    }
+    // Only shared edges receive a broader feather and slower color handoff.
+    // A cloud's clear interior retains its original fast musical lighting.
+    float overlap=smoothstep(.16,.80,second/max(first,.000001));
+    for(int i=0;i<4;i++){
+      ownership[i]=exp((scores[i]-largestScore)*mix(1.,.86,overlap));
       total+=ownership[i];
     }
     vec3 col=vec3(.003,.008,.026);
     for(int i=0;i<4;i++){
-      ownership[i]/=max(total,.00001);
+      ownership[i]/=total;
       vec2 p=local[i]+vec2(float(i)*7.3,float(i)*4.1);
       float mist=fbm(p*2.9+u_motion.xy*1.7);
       float grain=fbm(vec2(p.x*8.1,p.y*13.2)+u_motion.zw*.8);
@@ -84,23 +101,23 @@ canvas{display:block;width:100%;height:100%}
       vec3 normal=normalize(vec3(-slope,.85));
       sheen[i]=pow(max(0.,dot(normal,normalize(vec3(-.35,.24,1.)))),9.);
       ray[i]=spot(local[i],vec2(-.17,.02),vec2(.60,.17));
-      float band=i==0?spectrum(clamp(local[i].x+.5,0.,1.)*14.):
-                 i==1?spectrum(23.+clamp(local[i].x+.5,0.,1.)*10.):
-                 i==2?spectrum(14.+clamp(local[i].x+.5,0.,1.)*9.):
-                      spectrum(33.+clamp(local[i].x+.5,0.,1.)*12.);
-      float energy=u_energy[i];
+      float band=i==0?spectrum(clamp(local[i].x+.5,0.,1.)*14.,overlap):
+                 i==1?spectrum(23.+clamp(local[i].x+.5,0.,1.)*10.,overlap):
+                 i==2?spectrum(14.+clamp(local[i].x+.5,0.,1.)*9.,overlap):
+                      spectrum(33.+clamp(local[i].x+.5,0.,1.)*12.,overlap);
+      float energy=mix(u_energy[i],u_edgeEnergy[i],overlap);
       float strength=i==0?.24:i==1?.24:i==2?.43:.29;
       vec3 c=pigment(i);
       float body=strength*density[i]+.035+energy*.09;
       float scattered=ray[i]*(.035+.18*density[i])*(.75+energy*.35);
       float paint=detail[i]*(.17+energy*.22)*(.18+.65*ray[i]);
-      float surface=sheen[i]*(.006+band*.08+u_music.w*.018);
+      float surface=sheen[i]*(.006+band*.08+mix(u_music.w,u_edgeMusic.w,overlap)*.018);
       col+=c*(body+scattered+paint+surface)*ownership[i];
     }
     // Light envelopes are summed per cloud before upload. This is identical
     // to summing each overlapping pulse here, with just four light uniforms.
     for(int cloud=0;cloud<4;cloud++){
-      float envelope=u_lights[cloud];
+      float envelope=mix(u_lights[cloud],u_edgeLights[cloud],overlap);
       if(envelope<=0.)continue;
       vec2 p=local[cloud];
       float illumination=spot(p,vec2(-.05,.02),vec2(.70,.43));
@@ -141,6 +158,12 @@ canvas{display:block;width:100%;height:100%}
   // Beats may flash quickly; the gas volume itself has gentle, bounded inertia.
   const sizeTargets=new Float64Array([.94,.94,.94,.94]),sizeVelocity=new Float64Array(4);
   const lightTargets=new Float32Array(4),lightVelocity=new Float64Array(4);
+  // Boundary lighting has its own fixed, continuous-velocity animation state.
+  // No history textures or framebuffer feedback are needed for the crossfade.
+  const edgeEnergy=new Float32Array(4),edgeEnergyVelocity=new Float64Array(4);
+  const edgeLights=new Float32Array(4),edgeLightVelocity=new Float64Array(4);
+  const edgeMusic=new Float32Array(4),edgeMusicVelocity=new Float64Array(4);
+  const edgeBands=new Float32Array(48),edgeBandVelocity=new Float64Array(48);
   const cloudStates=[{x:.19,y:.80,vx:0,vy:0,angle:-.08},{x:.81,y:.80,vx:0,vy:0,angle:-.08},{x:.19,y:.20,vx:0,vy:0,angle:-.08},{x:.81,y:.20,vx:0,vy:0,angle:-.08}];
   const pulse=new Float32Array(4);
   const flowForces=new Float32Array(8);
@@ -187,7 +210,7 @@ canvas{display:block;width:100%;height:100%}
     gl.bindBuffer(gl.ARRAY_BUFFER,buffer);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,3,-1,-1,3]),gl.STATIC_DRAW);
     gl.useProgram(programs[0]);const a=gl.getAttribLocation(programs[0],'a_position');gl.enableVertexAttribArray(a);gl.vertexAttribPointer(a,2,gl.FLOAT,false,0,0);
     const at=n=>gl.getUniformLocation(programs[0],n);
-    loc={res:at('u_resolution'),motion:at('u_motion'),clouds:at('u_clouds[0]'),music:at('u_music'),energy:at('u_energy'),sizes:at('u_sizes'),bands:at('u_bands[0]'),lights:at('u_lights')};
+    loc={res:at('u_resolution'),motion:at('u_motion'),clouds:at('u_clouds[0]'),music:at('u_music'),energy:at('u_energy'),sizes:at('u_sizes'),bands:at('u_bands[0]'),lights:at('u_lights'),edgeEnergy:at('u_edgeEnergy'),edgeLights:at('u_edgeLights'),edgeMusic:at('u_edgeMusic'),edgeBands:at('u_edgeBands[0]')};
     resizePending=true;if(visible)resize();
   }
   function birth(cloud,strength,born){
@@ -291,7 +314,10 @@ canvas{display:block;width:100%;height:100%}
     // Coupled spatial eddies, soft walls, and repulsion keep the volumes distinct.
     driftActivity+=(activity-driftActivity)*(1-Math.exp(-dt/.60));
     driftLevel+=(music[0]-driftLevel)*(1-Math.exp(-dt/.60));
-    const speed=1+.28*driftLevel+.20*driftActivity;
+    // Preserve quiet-passage travel, then add a modest, smoothly gated boost
+    // during loud/intense phrases. The existing velocity inertia stays intact.
+    const loud=clamp((driftLevel-.40)/.50),intensity=loud*loud*(3-2*loud);
+    const speed=1+.28*driftLevel+.20*driftActivity+.24*intensity;
     flowClock+=dt*speed;
     pulse.fill(0);lightTargets.fill(0);
     for(const light of lights){
@@ -314,7 +340,13 @@ canvas{display:block;width:100%;height:100%}
       // Smooth late/irregular packet handoffs, with a short response so the
       // lighting still marks the beat rather than sharing the slower geometry.
       settle(lightEnergy,lightVelocity,i,lightTargets[i],70,dt);
+      // Shared colors evolve on a phrase-scale envelope, independently of the
+      // quick core pulse. Retargeting preserves velocity through dense rhythms.
+      settle(edgeEnergy,edgeEnergyVelocity,i,energy[i],12,dt);
+      settle(edgeLights,edgeLightVelocity,i,lightEnergy[i],14,dt);
+      settle(edgeMusic,edgeMusicVelocity,i,music[i],12,dt);
     }
+    for(let i=0;i<48;i++)settle(edgeBands,edgeBandVelocity,i,bands[i],12,dt);
     for(let i=0;i<4;i++){
       const c=cloudStates[i],px=c.x*Math.PI,py=c.y*Math.PI;
       const phase=cloudPathPhases[i];
@@ -341,6 +373,7 @@ canvas{display:block;width:100%;height:100%}
   function render(){
     gl.useProgram(programs[0]);gl.bindFramebuffer(gl.FRAMEBUFFER,null);gl.viewport(0,0,w,h);
     gl.uniform2f(loc.res,w,h);gl.uniform4fv(loc.motion,motion);gl.uniform4fv(loc.clouds,clouds);gl.uniform4fv(loc.music,music);gl.uniform4fv(loc.energy,energy);gl.uniform4fv(loc.sizes,sizes);gl.uniform1fv(loc.bands,bands);gl.uniform4fv(loc.lights,lightEnergy);
+    gl.uniform4fv(loc.edgeEnergy,edgeEnergy);gl.uniform4fv(loc.edgeLights,edgeLights);gl.uniform4fv(loc.edgeMusic,edgeMusic);gl.uniform1fv(loc.edgeBands,edgeBands);
     gl.drawArrays(gl.TRIANGLES,0,3);
     gpuFence=gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE,0);
     if(!gpuFence)throw new Error('GPU fence allocation failed');
