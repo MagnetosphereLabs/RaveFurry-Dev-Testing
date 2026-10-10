@@ -132,11 +132,15 @@ canvas{display:block;width:100%;height:100%}
   let gpuFence=null,resizePending=true,nextRender=0,rendered=0,gpuSkipped=0;
   let obsVisible=true,visible=!document.hidden;
   let socket=null,reconnectTimer=0,retry=500,lastReceived=-Infinity,lastIds=null,connectionOpened=0;
-  let lastFrame=0,flowClock=0,simPhase=0,activity=0,driftActivity=0;
+  let lastFrame=0,flowClock=0,simPhase=0,activity=0,driftActivity=0,driftLevel=0;
   const bands=new Float32Array(48),music=new Float32Array(4),desiredBands=new Float32Array(48),desiredMusic=new Float32Array(4);
   const clouds=new Float32Array(16),motion=new Float32Array(4),lightEnergy=new Float32Array(4);
   const lights=Array.from({length:LIGHT_COUNT},()=>({born:-100,cloud:0,strength:0}));
   const energy=new Float32Array(4),desiredEnergy=new Float32Array(4),balance=new Float32Array(4),desiredBalance=new Float32Array(4),sizes=new Float32Array([.94,.94,.94,.94]);
+  // Fixed animation state: retarget from the current position AND velocity.
+  // Beats may flash quickly; the gas volume itself has gentle, bounded inertia.
+  const sizeTargets=new Float64Array([.94,.94,.94,.94]),sizeVelocity=new Float64Array(4);
+  const lightTargets=new Float32Array(4),lightVelocity=new Float64Array(4);
   const cloudStates=[{x:.19,y:.80,vx:0,vy:0,angle:-.08},{x:.81,y:.80,vx:0,vy:0,angle:-.08},{x:.19,y:.20,vx:0,vy:0,angle:-.08},{x:.81,y:.20,vx:0,vy:0,angle:-.08}];
   const pulse=new Float32Array(4);
   const flowForces=new Float32Array(8);
@@ -192,6 +196,20 @@ canvas{display:block;width:100%;height:100%}
     if(slot){slot.cloud=cloud;slot.strength=Math.min(1,strength);slot.born=born;}
   }
   const clamp=value=>Math.max(0,Math.min(1,value));
+  function settle(values,velocities,index,target,frequency,dt,maxSpeed=Infinity,maxAcceleration=Infinity){
+    if(dt<=0)return;
+    const current=values[index],velocity=velocities[index];
+    const offset=current-target,carry=velocity+frequency*offset,decay=Math.exp(-frequency*dt);
+    // Exact critically damped spring for a held target. A new cue never resets
+    // its position or velocity, unlike replacing an in-progress animation.
+    const next=target+(offset+carry*dt)*decay;
+    const nextVelocity=(velocity-frequency*carry*dt)*decay;
+    const boundedVelocity=Math.max(-maxSpeed,Math.min(maxSpeed,Math.max(velocity-maxAcceleration*dt,Math.min(velocity+maxAcceleration*dt,nextVelocity))));
+    // Keep one integration rule for bounded geometry, including the instant
+    // that a limit engages/releases; switching rules can add a tiny jerk.
+    values[index]=Number.isFinite(maxSpeed)||Number.isFinite(maxAcceleration)?current+(velocity+boundedVelocity)*.5*dt:next;
+    velocities[index]=boundedVelocity;
+  }
   function receive(raw){
     if(typeof raw!=='string'||raw.length>16384)return;
     let data;try{data=JSON.parse(raw);}catch(error){return;}
@@ -272,23 +290,30 @@ canvas{display:block;width:100%;height:100%}
     // Slow, advected flow rather than four points on the same circular orbit.
     // Coupled spatial eddies, soft walls, and repulsion keep the volumes distinct.
     driftActivity+=(activity-driftActivity)*(1-Math.exp(-dt/.60));
-    const speed=1+.28*music[0]+.20*driftActivity;
+    driftLevel+=(music[0]-driftLevel)*(1-Math.exp(-dt/.60));
+    const speed=1+.28*driftLevel+.20*driftActivity;
     flowClock+=dt*speed;
-    pulse.fill(0);lightEnergy.fill(0);
+    pulse.fill(0);lightTargets.fill(0);
     for(const light of lights){
       const age=now-light.born;
       if(age>=1.9)light.strength=0;
       if(!light.strength||age<0)continue;
       const attack=1-Math.exp(-age/.018);
       const fade=clamp((age-1.45)/.45);
-      lightEnergy[light.cloud]+=attack*(Math.exp(-age/.23)+.16*Math.exp(-age/.75))*(1-fade*fade*(3-2*fade))*light.strength;
+      lightTargets[light.cloud]+=attack*(Math.exp(-age/.23)+.16*Math.exp(-age/.75))*(1-fade*fade*(3-2*fade))*light.strength;
       pulse[light.cloud]+=attack*Math.exp(-age/.32)*light.strength;
     }
     for(let i=0;i<4;i++){
       energy[i]+=(desiredEnergy[i]-energy[i])*(1-Math.exp(-dt/(desiredEnergy[i]>energy[i]?.035:.30)));
       balance[i]+=(desiredBalance[i]-balance[i])*(1-Math.exp(-dt/.38));
       const targetSize=.84+.18*energy[i]+.38*music[0]*Math.sqrt(balance[i])+.10*Math.min(1,pulse[i]);
-      sizes[i]+=(targetSize-sizes[i])*(1-Math.exp(-dt/(targetSize>sizes[i]?.16:.80)));
+      // Follow the musical phrase without stretching the fine paint on every
+      // rapid hit. Targets evolve; existing size/velocity are never restarted.
+      sizeTargets[i]+=(targetSize-sizeTargets[i])*(1-Math.exp(-dt/.18));
+      settle(sizes,sizeVelocity,i,sizeTargets[i],8,dt,.24,.90);
+      // Smooth late/irregular packet handoffs, with a short response so the
+      // lighting still marks the beat rather than sharing the slower geometry.
+      settle(lightEnergy,lightVelocity,i,lightTargets[i],70,dt);
     }
     for(let i=0;i<4;i++){
       const c=cloudStates[i],px=c.x*Math.PI,py=c.y*Math.PI;
