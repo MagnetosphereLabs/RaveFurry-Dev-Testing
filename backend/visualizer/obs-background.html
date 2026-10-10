@@ -149,7 +149,7 @@ canvas{display:block;width:100%;height:100%}
   let gpuFence=null,resizePending=true,nextRender=0,rendered=0,gpuSkipped=0;
   let obsVisible=true,visible=!document.hidden;
   let socket=null,reconnectTimer=0,retry=500,lastReceived=-Infinity,lastIds=null,connectionOpened=0;
-  let lastFrame=0,flowClock=0,simPhase=0,activity=0,driftActivity=0,driftLevel=0;
+  let lastFrame=0,flowClock=0,simPhase=0,activity=0,driftActivity=0,driftLevel=0,desiredRhythm=0,driftRhythm=0;
   const bands=new Float32Array(48),music=new Float32Array(4),desiredBands=new Float32Array(48),desiredMusic=new Float32Array(4);
   const clouds=new Float32Array(16),motion=new Float32Array(4),lightEnergy=new Float32Array(4);
   const lights=Array.from({length:LIGHT_COUNT},()=>({born:-100,cloud:0,strength:0}));
@@ -243,6 +243,8 @@ canvas{display:block;width:100%;height:100%}
     const now=performance.now()/1000;lastReceived=now;retry=500;
     desiredMusic.set([clamp(data.level),clamp(data.bass),clamp(data.mid),clamp(data.treble)]);
     desiredBands.set(data.bands.map(clamp));activity=clamp(data.activity);
+    // Optional fields keep an older helper compatible during an update.
+    desiredRhythm=Number.isFinite(data.rhythmDrive)?clamp(data.rhythmDrive):activity;
     const fields=['cloudLevels','cloudBalance','cloudIds','cloudAt','cloudStrength'];
     const enhanced=fields.every(name=>Array.isArray(data[name])&&data[name].length===4&&data[name].every(Number.isFinite))&&data.cloudIds.every(id=>Number.isSafeInteger(id)&&id>=0);
     if(enhanced){
@@ -303,21 +305,22 @@ canvas{display:block;width:100%;height:100%}
     for(const light of lights){const age=now-light.born;if(age>=0&&age<1.9){const e=(1-Math.exp(-age/.018))*Math.exp(-age/.20)*light.strength;desiredMusic[light.cloud===1?2:1]+=e*.7;}}
     for(let i=0;i<48;i++){const x=i/47;desiredBands[i]=level*(.04+.48*Math.exp(-Math.pow((x-(.48+.22*Math.sin(now*.33)))*8,2)));}
     let sum=0;for(let i=0;i<4;i++){desiredEnergy[i]=clamp(level*(.40+.28*Math.sin(now*(.41+i*.13)+i*1.7)));desiredBalance[i]=desiredEnergy[i]**2;sum+=desiredBalance[i];}for(let i=0;i<4;i++)desiredBalance[i]/=Math.max(.0001,sum);
-    activity=level*.75;lastReceived=now;report('Simulated '+demo+' passage');
+    activity=level*.75;desiredRhythm=level?clamp((tempo-70)/110)*level:0;lastReceived=now;report('Simulated '+demo+' passage');
   }
   function update(dt,now){
     if(simulated)simulate(dt,now);
-    if(now-lastReceived>.50){desiredMusic.fill(0);desiredBands.fill(0);desiredEnergy.fill(0);desiredBalance.fill(0);activity=0;}
+    if(now-lastReceived>.50){desiredMusic.fill(0);desiredBands.fill(0);desiredEnergy.fill(0);desiredBalance.fill(0);activity=0;desiredRhythm=0;}
     for(let i=0;i<4;i++)music[i]+=(desiredMusic[i]-music[i])*(1-Math.exp(-dt/(desiredMusic[i]>music[i]?.022:.23)));
     for(let i=0;i<48;i++)bands[i]+=(desiredBands[i]-bands[i])*(1-Math.exp(-dt/(desiredBands[i]>bands[i]?.025:.19)));
     // Slow, advected flow rather than four points on the same circular orbit.
     // Coupled spatial eddies, soft walls, and repulsion keep the volumes distinct.
     driftActivity+=(activity-driftActivity)*(1-Math.exp(-dt/.60));
     driftLevel+=(music[0]-driftLevel)*(1-Math.exp(-dt/.60));
-    // Preserve quiet-passage travel, then add a modest, smoothly gated boost
-    // during loud/intense phrases. The existing velocity inertia stays intact.
+    driftRhythm+=(desiredRhythm-driftRhythm)*(1-Math.exp(-dt/1.2));
+    // Preserve quiet-passage travel. Bounded rhythm context adds a modest boost
+    // only during louder phrases, eased over 1.2 s. Velocity inertia stays intact.
     const loud=clamp((driftLevel-.40)/.50),intensity=loud*loud*(3-2*loud);
-    const speed=1+.28*driftLevel+.20*driftActivity+.24*intensity;
+    const speed=1+.28*driftLevel+.20*driftActivity+.24*intensity+.20*intensity*driftRhythm;
     flowClock+=dt*speed;
     pulse.fill(0);lightTargets.fill(0);
     for(const light of lights){
@@ -424,3 +427,4 @@ canvas{display:block;width:100%;height:100%}
 </script>
 </body>
 </html>
+
