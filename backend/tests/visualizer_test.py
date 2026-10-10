@@ -21,6 +21,17 @@ if AVAILABLE:
 
 @unittest.skipUnless(AVAILABLE, "Install the optional visualizer extra")
 class SignalTests(unittest.TestCase):
+    def passage(self, build, seconds=6, rate=48000):
+        analyzer = Analyzer(rate, 2)
+        frames = []
+        for i in range(round(seconds * rate / 512)):
+            t = (np.arange(512) + i * 512) / rate
+            wave = build(t)
+            frame = analyzer.feed(np.column_stack([wave, -wave]).astype("<f4").tobytes(), 100 + i * 512 / rate)
+            if frame is not None:
+                frames.append(frame)
+        return analyzer, frames
+
     def tone(self, frequency, amplitude=.3, antiphase=False):
         analyzer = Analyzer()
         for i in range(24):
@@ -77,6 +88,78 @@ class SignalTests(unittest.TestCase):
         capture.frame["level"] = .8
         self.assertEqual(capture.snapshot()["level"], 0)
         self.assertEqual(capture.snapshot()["status"], "idle")
+
+    def test_each_cloud_has_its_own_spectral_energy_and_onsets(self):
+        for cloud, frequency in enumerate((80, 1100, 350, 5000)):
+            analyzer, _ = self.passage(lambda t: .25 * np.sin(t * math.tau * frequency), seconds=3)
+            frame = analyzer.frame
+            self.assertEqual(frame["cloudIds"][cloud], 1)
+            self.assertEqual(sum(frame["cloudIds"]), 1, (frequency, frame["cloudIds"]))
+            self.assertGreater(frame["cloudLevels"][cloud], .8)
+            self.assertGreater(frame["cloudBalance"][cloud], .98)
+
+    def test_fast_mixed_compressed_music_retains_independent_hits(self):
+        def mixed(t):
+            phase = t % .25
+            envelope = (1 - np.exp(-phase / .002)) * np.exp(-phase / .035)
+            wave = .22 * np.sin(t * math.tau * 1050)
+            for frequency, strength in ((75, .23), (350, .12), (6200, .14)):
+                wave += strength * np.sin(t * math.tau * frequency) * envelope
+            return np.tanh(wave * 2) * .45
+        analyzer, _ = self.passage(mixed)
+        for cloud in (0, 2, 3):
+            self.assertGreaterEqual(analyzer.frame["cloudIds"][cloud], 20)
+            self.assertLessEqual(analyzer.frame["cloudIds"][cloud], 26)
+        self.assertGreater(analyzer.frame["cloudLevels"][1], .5)
+
+    def test_sustained_vocal_vibrato_does_not_invent_bass_drums(self):
+        def vocal(t):
+            phase = math.tau * (220 * t - 4 / (math.tau * 5) * np.cos(t * math.tau * 5))
+            return .12 * np.sin(phase) + .10 * np.sin(phase * 3) + .07 * np.sin(phase * 6) + .02 * np.sin(phase * 13)
+        analyzer, frames = self.passage(vocal)
+        self.assertLessEqual(analyzer.frame["cloudIds"][0], 1)
+        self.assertLessEqual(max(analyzer.frame["cloudIds"]), 4)
+        self.assertGreater(analyzer.frame["cloudLevels"][1], .5)
+        self.assertGreater(analyzer.frame["cloudLevels"][2], .5)
+        self.assertGreater(np.ptp([f["cloudLevels"][1] for f in frames]), .1)
+
+    def test_slow_swells_and_quiet_noise_are_not_repetitive_beats(self):
+        def pad(t):
+            envelope = (.3 + .25 * np.sin(t * .7)) * (1 - np.exp(-t / 2))
+            return envelope * sum(.08 * np.sin(t * math.tau * f) for f in (80, 350, 1000, 6000))
+        analyzer, frames = self.passage(pad, seconds=8)
+        self.assertLessEqual(max(analyzer.frame["cloudIds"]), 2)
+        self.assertGreater(np.ptp([f["cloudLevels"][1] for f in frames]), .3)
+        rng = np.random.default_rng(41)
+        noise, _ = self.passage(lambda t: rng.normal(0, 1e-6, len(t)))
+        self.assertEqual(noise.frame["cloudIds"], [0] * 4)
+        self.assertEqual(noise.frame["cloudLevels"], [0.0] * 4)
+
+    def test_cloud_recovery_offsets_stale_fields_and_immutable_snapshots(self):
+        capture = Capture()
+        capture.cloud_offsets = [10, 20, 30, 40]
+        frame = empty_frame()
+        frame["cloudIds"] = [1, 2, 3, 4]
+        frame["cloudLevels"] = [.7] * 4
+        capture._publish(frame)
+        capture._publish(frame)
+        self.assertEqual(capture.frame["cloudIds"], [11, 22, 33, 44])
+        self.assertEqual(frame["cloudIds"], [1, 2, 3, 4])
+        capture.frame["capturedAt"] = time.monotonic() - 5
+        snapshot = capture.snapshot()
+        for name in ("cloudLevels", "cloudBalance", "cloudStrength", "cloudFlux"):
+            self.assertEqual(snapshot[name], [0.0] * 4)
+        self.assertEqual(capture.frame["cloudLevels"], [.7] * 4)
+        self.assertEqual(snapshot["cloudIds"], [11, 22, 33, 44])
+
+    def test_formats_and_corrupt_samples_remain_finite_and_bounded(self):
+        for rate, channels in ((44100, 2), (48000, 1), (8000, 2), (192000, 8)):
+            analyzer = Analyzer(rate, channels)
+            data = np.full((4096, channels), np.nan, dtype="<f4")
+            data[0] = np.inf
+            frame = analyzer.feed(data.tobytes(), 100)
+            self.assertTrue(all(math.isfinite(v) for v in frame["cloudLevels"]))
+            self.assertEqual(analyzer.samples.shape, (2048, channels))
 
 
 @unittest.skipUnless(AVAILABLE, "Install the optional visualizer extra")
