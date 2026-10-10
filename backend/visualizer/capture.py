@@ -23,6 +23,8 @@ class Capture:
         self.status = "starting"
         self.device = ""
         self.error = ""
+        self.kick_offset = self.accent_offset = 0
+        self.cloud_offsets = [0] * 4
         self.heartbeat = time.monotonic()
         self.thread = threading.Thread(target=self._run, name="obs-audio-analysis", daemon=True)
 
@@ -45,6 +47,8 @@ class Capture:
             frame["bands"] = [0.0] * 48
             frame["rms"] = [0.0, 0.0]
             frame["peak"] = [0.0, 0.0]
+            for name in ("cloudLevels", "cloudBalance", "cloudFlux", "cloudStrength"):
+                frame[name] = [0.0] * 4
         frame.update({"serverTime": now, "status": "idle" if stale and status == "capturing" else status,
                       "device": device, "error": error})
         return frame
@@ -62,6 +66,7 @@ class Capture:
                 # Preserve onset IDs across capture-device recovery.
                 frame["kickId"] += self.kick_offset
                 frame["accentId"] += self.accent_offset
+                frame["cloudIds"] = [value + offset for value, offset in zip(frame["cloudIds"], self.cloud_offsets)]
                 self.frame = frame
 
     def _run(self):
@@ -71,6 +76,7 @@ class Capture:
             with self.lock:
                 self.kick_offset = self.frame["kickId"]
                 self.accent_offset = self.frame["accentId"]
+                self.cloud_offsets = list(self.frame["cloudIds"])
             try:
                 if os.name == "nt":
                     self._windows()
