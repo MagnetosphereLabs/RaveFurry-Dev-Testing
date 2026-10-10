@@ -6,7 +6,7 @@
 const fs=require('node:fs'),path=require('node:path'),vm=require('node:vm'),assert=require('node:assert/strict');
 const source=fs.readFileSync(path.join(__dirname,'../visualizer/obs-background.html'),'utf8');
 let script=source.match(/<script>([\s\S]*?)<\/script>/)[1];
-script=script.replace("window.addEventListener('pagehide',cleanup,{once:true});", "globalThis.inspect={receive,update,birth,getFlow:()=>flowClock,setFlow:v=>{flowClock=v;},getLights:()=>lights.map(x=>({...x})),getPositions:()=>[...clouds],getSizes:()=>[...sizes],getStats:()=>({rendered,gpuSkipped})};window.addEventListener('pagehide',cleanup,{once:true});");
+script=script.replace("window.addEventListener('pagehide',cleanup,{once:true});", "globalThis.inspect={receive,update,birth,getFlow:()=>flowClock,setFlow:v=>{flowClock=v;},getLights:()=>lights.map(x=>({...x})),getPositions:()=>[...clouds],getSizes:()=>[...sizes],getLightTargets:()=>[...lightTargets],getStats:()=>({rendered,gpuSkipped})};window.addEventListener('pagehide',cleanup,{once:true});");
 function harness(search=''){
  let now=0,next=1,gpuBusy=false,fenceFailure=false,draws=0,resizes=0;
  const resources={program:0,buffer:0,shader:0,sync:0,texture:0,fbo:0},peak={...resources};
@@ -35,7 +35,7 @@ function harness(search=''){
  function frames(n,hz=60){for(let i=0;i<n;i++){now+=1000/hz;assert.equal(pending.size,1);const [id,cb]=pending.entries().next().value;pending.delete(id);cb(now);}}
  function packet(extra={}){return {...{version:1,level:.65,bass:.7,mid:.5,treble:.4,activity:.5,bands:Array(48).fill(.3),serverTime:now/1000,kickAt:now/1000,accentAt:now/1000,kickId:1,accentId:1,kick:.7,accent:.5,status:'capturing',device:'test',cloudLevels:[.85,.6,.5,.35],cloudBalance:[.64,.16,.12,.08],cloudIds:[1,1,1,1],cloudAt:Array(4).fill(now/1000),cloudStrength:[.8,.6,.5,.4]},...extra};}
  function send(extra={}){ctx.inspect.receive(JSON.stringify(packet(extra)));}
- function snapshot(label){return {label,music:uniforms.u_music,bands:uniforms['u_bands[0]'],lights:uniforms.u_lights,clouds:uniforms['u_clouds[0]'],motion:uniforms.u_motion,energy:uniforms.u_energy,sizes:uniforms.u_sizes};}
+ function snapshot(label){return {label,music:uniforms.u_music,bands:uniforms['u_bands[0]'],lights:uniforms.u_lights,clouds:uniforms['u_clouds[0]'],motion:uniforms.u_motion,energy:uniforms.u_energy,sizes:uniforms.u_sizes,edgeEnergy:uniforms.u_edgeEnergy,edgeLights:uniforms.u_edgeLights,edgeMusic:uniforms.u_edgeMusic,edgeBands:uniforms['u_edgeBands[0]']};}
  return {ctx,gl,doc,canvas,status,resources,peak,pending,timers,hooks,docHooks,sockets,observers,uniforms,frames,packet,send,snapshot,get now(){return now;},get draws(){return draws;},get resizes(){return resizes;},set busy(v){gpuBusy=v;},set fenceFailure(v){fenceFailure=v;},lose(){canvas.listeners.webglcontextlost({preventDefault(){}});for(const type of Object.keys(resources))resources[type]=0;owned.clear();},restore(){canvas.listeners.webglcontextrestored();},cleanup(){hooks.get('pagehide')();}};
 }
 const h=harness(),states=[];
@@ -53,7 +53,7 @@ function validateLightSum(){
   const fade=Math.max(0,Math.min(1,(age-1.45)/.45));
   sums[l.cloud]+=(1-Math.exp(-age/.018))*(Math.exp(-age/.23)+.16*Math.exp(-age/.75))*(1-fade*fade*(3-2*fade))*l.strength;
  }
- for(let i=0;i<4;i++)assert(Math.abs(sums[i]-h.uniforms.u_lights[i])<.00001,'GPU light summation must preserve the original envelopes');
+ for(let i=0;i<4;i++)assert(Math.abs(sums[i]-h.ctx.inspect.getLightTargets()[i])<.00001,'GPU light summation must preserve the original envelopes');
 }
 validateLightSum();
 const earlyDraws=h.draws;h.busy=true;for(let i=0;i<400;i++){h.canvas.clientWidth=1280;h.observers[0].cb();h.frames(1);}
@@ -72,10 +72,10 @@ assert(minSeparation>.20,'Clouds must retain distinct centers');assert(maxStep<.
 assert.equal(h.peak.texture,0);assert.equal(h.peak.fbo,0);assert.equal(h.peak.program,1);assert.equal(h.peak.buffer,1);assert.equal(h.peak.sync,1);assert.equal(h.resources.shader,0);
 assert(h.uniforms.u_music.every(v=>v<.0001));states.push(h.snapshot('idle'));
 // Smooth, spectrally-driven sizes: bass or treble can dominate without equal sizes.
-h.send({cloudIds:[10,10,10,10],level:.8,cloudLevels:[.9,.1,.1,.05],cloudBalance:[.97,.01,.015,.005]});h.frames(20);states.push(h.snapshot('bass-dominant'));
+for(let n=0;n<120;n++){h.send({cloudIds:[10,10,10,10],level:.8,cloudLevels:[.9,.1,.1,.05],cloudBalance:[.97,.01,.015,.005]});h.frames(1);}states.push(h.snapshot('bass-dominant'));
 const bassSizes=h.ctx.inspect.getSizes();assert(bassSizes[0]>bassSizes[3]+.20);
 h.send({cloudIds:[11,11,11,11],cloudLevels:[.05,.10,.10,.95],cloudBalance:[.005,.015,.01,.97]});const size0=h.ctx.inspect.getSizes();h.frames(1);assert(Math.max(...h.ctx.inspect.getSizes().map((v,i)=>Math.abs(v-size0[i])))<.05,'Size targets must ease, not snap');
-for(let i=0;i<30;i++){h.send({cloudLevels:[.05,.1,.1,.95],cloudBalance:[.005,.015,.01,.97]});h.frames(2);}states.push(h.snapshot('treble-dominant'));assert(h.ctx.inspect.getSizes()[3]>h.ctx.inspect.getSizes()[0]+.12);
+for(let i=0;i<90;i++){h.send({cloudLevels:[.05,.1,.1,.95],cloudBalance:[.005,.015,.01,.97]});h.frames(2);}states.push(h.snapshot('treble-dominant'));assert(h.ctx.inspect.getSizes()[3]>h.ctx.inspect.getSizes()[0]+.12);
 // OBS hiding does no rendering/reallocation. Showing resumes one loop/socket.
 const hiddenDraws=h.draws;h.hooks.get('obsSourceVisibleChanged')({detail:{visible:false}});assert.equal(h.pending.size,0);assert(h.sockets.at(-1).closed);
 h.doc.hidden=true;h.docHooks.get('visibilitychange')();h.hooks.get('obsSourceVisibleChanged')({detail:{visible:true}});assert.equal(h.pending.size,0);
@@ -88,5 +88,18 @@ h.cleanup();assert.equal(h.pending.size,0);assert.equal(h.timers.size,0);assert(
 for(const hz of [60,120,144,240]){const p=harness('?demo=rhythm');p.frames(hz*4,hz);assert(p.draws>=238&&p.draws<=241,`${hz} Hz rendered ${p.draws} frames`);p.cleanup();}
 // A bad native completion check must fail closed, never create an unlimited queue.
 const broken=harness();broken.frames(1);broken.fenceFailure=true;broken.frames(1);assert.equal(broken.pending.size,0);assert.equal(broken.resources.sync,0);assert.equal(broken.resources.program,0);
+
+// Optional rhythm metadata changes flow speed, never cloud position directly.
+const rates={};
+for(const [name,level,rhythmDrive] of [['quiet',.25,1],['loudCalm',.95,0],['loudRhythm',.95,1]]){
+ const p=harness();p.sockets[0].onopen();p.frames(1);
+ for(let n=0;n<600;n++){p.send({level,activity:1,rhythmDrive});p.frames(1);}
+ const start=p.ctx.inspect.getFlow();
+ for(let n=0;n<120;n++){p.send({level,activity:1,rhythmDrive});p.frames(1);}
+ rates[name]=(p.ctx.inspect.getFlow()-start)/2;
+ p.cleanup();assert(Object.values(p.resources).every(v=>v===0));
+}
+assert(Math.abs(rates.quiet-1.27)<.001,'Quiet movement must retain the previous speed even with high rhythm activity');
+assert(rates.loudRhythm>rates.loudCalm+.18);assert(rates.loudRhythm<=1.921);
 const output=process.argv.indexOf('--states');if(output>=0)fs.writeFileSync(process.argv[output+1],JSON.stringify(states));
 console.log(JSON.stringify({passed:true,frames:60000,maxLiveResources:h.peak,flowBounds:bounds,minSeparation,maxStep,visitedQuadrants:visits.map(v=>v.size),checks:'GPU backpressure, unchanged resize, visibility, context recovery, all-cloud pulses, size smoothing, high-refresh pacing and disposal'}));
