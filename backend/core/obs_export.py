@@ -21,7 +21,9 @@ _worker: threading.Thread | None = None
 _worker_lock = threading.Lock()
 _stop = threading.Event()
 EMPTY_QUEUE_LINES = ["Queue empty", "Add music using our website: furatic.xyz"]
-OBS_NAME_LIMIT = 24
+OBS_NAME_REFERENCE = "Queue empty, add music using our website, furatic.xyz"
+OBS_NAME_LIMIT = len(OBS_NAME_REFERENCE)
+_OBS_BRACKETS = re.compile(r"\(([^()]*)\)|\[([^\[\]]*)\]")
 _OBS_ANNOTATION = re.compile(
     r"^(?:official\b|unofficial\b|music video\b|lyrics?\b|audio\b|video\b|"
     r"visuali[sz]er\b|live\b|performance\b|remaster(?:ed)?\b|"
@@ -62,9 +64,9 @@ def _clean_obs_names(title: Any, artist: Any) -> tuple[str, str]:
         label = match.group(1) if match.group(1) is not None else match.group(2)
         credit = re.sub(r"^(?:feat(?:uring)?\.?|ft\.?|with)\s+", "", label.strip(), flags=re.IGNORECASE)
         credit_key = re.sub(r"[\W_]+", "", credit.casefold()) or credit.casefold()
-        return " " if _OBS_ANNOTATION.match(label.strip()) or credit_key in seen else match.group(0)
+        return " " if credit_key in seen else match.group(0)
 
-    # Remove upload/performance labels; retain meaningful title parentheses.
+    # Remove repeated artist credits; fit optional qualifiers per line below.
     previous = None
     while previous != title:
         previous = title
@@ -72,7 +74,9 @@ def _clean_obs_names(title: Any, artist: Any) -> tuple[str, str]:
     title = _obs_text(title)
     segments = re.split(r"\s+[-–—|]\s+", title)
     if len(segments) > 1 and _OBS_ANNOTATION.match(segments[-1]):
-        title = title[:list(re.finditer(r"\s+[-–—|]\s+", title))[-1].start()]
+        prefix = title[:list(re.finditer(r"\s+[-–—|]\s+", title))[-1].start()]
+        if prefix.count("(") == prefix.count(")") and prefix.count("[") == prefix.count("]"):
+            title = prefix
     title = title or raw_title
 
     original_title = title
@@ -96,8 +100,95 @@ def _clean_obs_names(title: Any, artist: Any) -> tuple[str, str]:
     return _obs_text(title or original_title), artist
 
 
+def _obs_text_width(value: str) -> float:
+    """Estimate relative glyph width without opening fonts or native resources."""
+    width = 0.0
+    for char in value:
+        if unicodedata.category(char).startswith("M") or unicodedata.category(char) == "Cf":
+            continue
+        if unicodedata.east_asian_width(char) in {"W", "F"}:
+            width += 2.0
+        elif char.isspace():
+            width += 0.5
+        elif char in "ilI.,'`!:;|":
+            width += 0.45
+        elif char in "MW@%&":
+            width += 1.5
+        else:
+            width += 1.15 if char.isupper() else 1.0
+    return width
+
+
 def _obs_name_line(value: str) -> str:
-    return value if len(value) <= OBS_NAME_LIMIT else value[:OBS_NAME_LIMIT - 1].rstrip() + "…"
+    """Fit one OBS name independently, removing whole qualifiers before clipping."""
+    value = _obs_text(value)
+
+    def words(text):
+        return re.sub(r"[\W_]+", " ", text.casefold()).strip()
+
+    base_words = words(_OBS_BRACKETS.sub(" ", value))
+    qualifiers = set()
+
+    def unique_qualifier(match):
+        label = words(match.group(1) if match.group(1) is not None else match.group(2))
+        repeated = label == base_words or (
+            len(label.split()) > 1 and f" {label} " in f" {base_words} "
+        )
+        if not label or label in qualifiers or repeated:
+            return " "
+        qualifiers.add(label)
+        return match.group(0)
+
+    value = _obs_text(_OBS_BRACKETS.sub(unique_qualifier, value))
+    budget = _obs_text_width(OBS_NAME_REFERENCE)
+
+    def fits(text):
+        return len(text) <= OBS_NAME_LIMIT and _obs_text_width(text) <= budget
+
+    if fits(value):
+        return value
+
+    original = value
+    # Prefer upload/performance labels and trailing qualifiers over title words.
+    def without_annotation(match):
+        label = match.group(1) if match.group(1) is not None else match.group(2)
+        return " " if _OBS_ANNOTATION.match(label.strip()) else match.group(0)
+
+    shorter = _obs_text(_OBS_BRACKETS.sub(without_annotation, value))
+    if shorter:
+        value = shorter
+    while not fits(value):
+        trailing = re.search(r"\s+(?:\([^()]*\)|\[[^\[\]]*\])$", value)
+        if not trailing:
+            break
+        value = value[:trailing.start()].rstrip()
+    if fits(value):
+        return value
+
+    previous = None
+    while previous != value:
+        previous = value
+        value = _OBS_BRACKETS.sub(" ", value)
+    # Drop an unfinished qualifier too; never clip halfway through its opening.
+    value = re.sub(r"[\(\[].*$", "", value)
+    value = _obs_text(value).strip(" -–—|,;:")
+    if not value:
+        # A title consisting entirely of parentheses still has a real name.
+        value = _obs_text(re.sub(r"[()\[\]]", " ", original))
+    if fits(value):
+        return value
+
+    prefix = ""
+    for char in value:
+        if not fits(prefix + char + "…"):
+            break
+        prefix += char
+    # Prefer a complete word without discarding most of a long unbroken name.
+    if len(prefix) < len(value) and not value[len(prefix)].isspace():
+        boundary = prefix.rfind(" ")
+        if boundary >= len(prefix) * 0.6:
+            prefix = prefix[:boundary]
+    return prefix.rstrip(" -–—|,;:()[]") + "…"
 
 
 def _song_lines(position, duration, title, artist, votes) -> List[str]:
