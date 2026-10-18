@@ -3,9 +3,8 @@ setlocal EnableExtensions
 
 REM ====================================================================
 REM Raveberry Interactive Installer for Windows 11, runs on localhost.
-REM Serves through anywt/newt to your server running Pangolin.
-REM Run this from an activated Conda environment intended for Raveberry.
-REM Install the VLC Desktop app on your PC before Raveberry.
+REM Serves through anywt/newt to our server running Pangolin.
+REM Run this from an activated Conda environment intended for Ravefurry.
 REM ====================================================================
 
 REM ---------- Defaults ----------
@@ -14,8 +13,8 @@ set "DEFAULT_CONFIG_PATH=%USERPROFILE%\raveberry.yaml"
 set "DEFAULT_INSTALL_DIR=C:\opt\raveberry\"
 set "DEFAULT_HOSTNAME=127.0.0.1"
 set "DEFAULT_PORT=8080"
-set "DEFAULT_RAVEBERRY_REPO=https://github.com/OrangeC7/ravefurry.git"
-set "DEFAULT_RAVEBERRY_REF=master"
+set "DEFAULT_RAVEBERRY_REPO=https://github.com/Furatic/RaveFurry.git"
+set "DEFAULT_RAVEBERRY_REF=main"
 
 set "DEFAULT_YOUTUBE=true"
 set "DEFAULT_SPOTIFY=false"
@@ -584,7 +583,6 @@ if errorlevel 1 (
 )
 
 python -m pip install --force-reinstall "raveberry[run] @ git+%DEFAULT_RAVEBERRY_REPO%@%DEFAULT_RAVEBERRY_REF%"
-python -m pip install --upgrade yt-dlp
 if errorlevel 1 (
     call :die "Failed to install raveberry from the GitHub repository."
     exit /b 1
@@ -627,6 +625,12 @@ if not exist "%RAVEBERRY_SOURCE_DIR%" (
 ) else (
     if not exist "%RAVEBERRY_SOURCE_DIR%\.git" (
         call :die "Source directory exists but is not a git repository: %RAVEBERRY_SOURCE_DIR%"
+        exit /b 1
+    )
+    REM Keep existing source checkouts pointed at the selected repository.
+    git -C "%RAVEBERRY_SOURCE_DIR%" remote set-url origin "%DEFAULT_RAVEBERRY_REPO%"
+    if errorlevel 1 (
+        call :die "Failed to update the source repository URL."
         exit /b 1
     )
     git -C "%RAVEBERRY_SOURCE_DIR%" fetch origin
@@ -730,7 +734,7 @@ if errorlevel 1 (
 
 if not exist "%RAVEBERRY_PGDATA%\PG_VERSION" (
     call :log "Initializing local PostgreSQL data directory"
-    initdb -D "%RAVEBERRY_PGDATA%" -U postgres -A trust
+    initdb -D "%RAVEBERRY_PGDATA%" -U postgres -A trust --encoding=UTF8
     if errorlevel 1 (
         call :die "Failed to initialize PostgreSQL data directory."
         exit /b 1
@@ -768,13 +772,28 @@ if errorlevel 1 (
     )
 )
 
-psql -h %POSTGRES_HOST% -p %POSTGRES_PORT% -U postgres -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname='%POSTGRES_DB%'" 2>nul | findstr /R "^[ ]*1[ ]*$" >nul
-if errorlevel 1 (
-    call :log "Creating PostgreSQL database %POSTGRES_DB%"
-    createdb -h %POSTGRES_HOST% -p %POSTGRES_PORT% -U postgres -O %POSTGRES_USER% %POSTGRES_DB%
-    if errorlevel 1 (
-        call :die "Failed to create PostgreSQL database '%POSTGRES_DB%'."
-        exit /b 1
+set "RB_DB_EXISTS="
+for /f "usebackq delims=" %%I in (`psql -h %POSTGRES_HOST% -p %POSTGRES_PORT% -U postgres -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname='%POSTGRES_DB%'" 2^>nul`) do set "RB_DB_EXISTS=%%I"
+set "RB_DB_EXISTS=%RB_DB_EXISTS: =%"
+
+if not "%RB_DB_EXISTS%"=="1" (
+    echo.
+    echo [INFO] Creating PostgreSQL database %POSTGRES_DB% with UTF8 encoding...
+    createdb -h %POSTGRES_HOST% -p %POSTGRES_PORT% -U postgres -O %POSTGRES_USER% -E UTF8 -T template0 %POSTGRES_DB%
+    if errorlevel 1 exit /b 1
+) else (
+    set "RB_DB_ENCODING="
+    for /f "usebackq delims=" %%I in (`psql -h %POSTGRES_HOST% -p %POSTGRES_PORT% -U postgres -d postgres -tAc "SELECT pg_encoding_to_char(encoding) FROM pg_database WHERE datname='%POSTGRES_DB%'" 2^>nul`) do set "RB_DB_ENCODING=%%I"
+    set "RB_DB_ENCODING=%RB_DB_ENCODING: =%"
+
+    if /I not "%RB_DB_ENCODING%"=="UTF8" (
+        echo.
+        echo [INFO] Recreating PostgreSQL database %POSTGRES_DB% with UTF8 encoding...
+        psql -h %POSTGRES_HOST% -p %POSTGRES_PORT% -U postgres -d postgres -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='%POSTGRES_DB%' AND pid <> pg_backend_pid();" >nul 2>&1
+        dropdb -h %POSTGRES_HOST% -p %POSTGRES_PORT% -U postgres --if-exists %POSTGRES_DB%
+        if errorlevel 1 exit /b 1
+        createdb -h %POSTGRES_HOST% -p %POSTGRES_PORT% -U postgres -O %POSTGRES_USER% -E UTF8 -T template0 %POSTGRES_DB%
+        if errorlevel 1 exit /b 1
     )
 )
 
