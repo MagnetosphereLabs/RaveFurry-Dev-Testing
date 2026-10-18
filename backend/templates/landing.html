@@ -836,6 +836,14 @@
       .control-dock .tv-corner-button { position: relative; inset: auto; translate: none; scale: 1; transform: none;
         transition-property: opacity, transform, filter, background, box-shadow; }
       .player-layout.is-tv-open .control-dock .tv-corner-button { transform: none; }
+      /* Reuse placement tracking to let Help occupy the hidden TV button's slot. */
+      .player-layout.is-tv-open .control-dock #tutorial-toggle { top: 58px; }
+      @media (max-width: 799px) {
+        .player-layout.is-tv-open .control-dock #tutorial-toggle { top: 0; left: 52px; }
+      }
+      @media (max-width: 480px) {
+        .player-layout.is-tv-open .control-dock #tutorial-toggle { left: 50px; }
+      }
       .logo-slot { display: none; }
       @media (min-width: 1581px) {
         .player-layout.is-tv-open .logo-slot { display: block; position: absolute; right: 74px; top: 310px; width: 150px; }
