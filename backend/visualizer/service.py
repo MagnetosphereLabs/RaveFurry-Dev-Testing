@@ -23,6 +23,8 @@ from .capture import Capture
 
 MAX_CLIENTS = 4
 PAGE = Path(__file__).with_name("obs-background.html")
+NOTIFICATION_SCRIPT = Path(__file__).with_name("obs-notifications.js")
+NOTIFICATION_FILE = PAGE.parent.parent / "config" / "obs_vote_notification.json"
 LOG = logging.getLogger("furatic.visualizer")
 
 
@@ -92,6 +94,32 @@ def create_app(capture, port):
 
     async def page(request):
         return web.Response(body=PAGE.read_bytes(), content_type="text/html")
+
+    async def notification_script(request):
+        return web.Response(body=NOTIFICATION_SCRIPT.read_bytes(), content_type="application/javascript")
+
+    def read_notification():
+        # Local, size-bounded, read-only metadata; never Django or audio buffers.
+        try:
+            with NOTIFICATION_FILE.open("rb") as source:
+                raw = source.read(8193)
+            if len(raw) > 8192:
+                raise ValueError("Oversized notification")
+            value = json.loads(raw)
+            now = time.time()
+            if value.get("version") != 1 or not 0 <= now - value["updatedAt"] < 10:
+                raise ValueError("Stale notification")
+            message = value.get("message")
+            if message and not message["createdAt"] <= now < message["expiresAt"]:
+                value["message"] = None
+            return value
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            return {"version": 1, "message": None}
+
+    async def notification(request):
+        # Disk access is off the audio/scene event loop. This endpoint is polled
+        # once every two seconds only by the OBS page, never by the website.
+        return web.json_response(await asyncio.to_thread(read_notification))
 
     async def health(request):
         alive = capture.healthy()
@@ -178,6 +206,8 @@ def create_app(capture, port):
     app = web.Application(middlewares=[only_local], client_max_size=1024)
     app.router.add_get("/", page)
     app.router.add_get("/obs-background.html", page)
+    app.router.add_get("/obs-notifications.js", notification_script)
+    app.router.add_get("/vote-notification.json", notification)
     app.router.add_get("/_healthz/", health)
     app.router.add_get("/features", socket)
     app.router.add_get("/features.json", features)
