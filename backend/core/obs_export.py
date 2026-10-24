@@ -13,6 +13,7 @@ from typing import Any, Dict, Iterable, List
 from django.conf import settings as conf
 
 from core.musiq import song_utils
+from core.musiq.display_name import clean_display_names
 from core.safe_files import atomic_write_text, retry_file_operation, safe_unlink
 
 LOGGER = logging.getLogger(__name__)
@@ -48,56 +49,8 @@ def _obs_text(value: Any) -> str:
 
 def _clean_obs_names(title: Any, artist: Any) -> tuple[str, str]:
     """Clean display-only credits without changing stored or queued metadata."""
-    title, artist = _obs_text(title), _obs_text(artist)
-    raw_title = title
-    credits = []
-    seen = set()
-    for credit in re.split(r"[,;]", artist):
-        credit = re.sub(r"\s*[-–—]\s*Topic$|VEVO$", "", credit, flags=re.IGNORECASE).strip()
-        key = re.sub(r"[\W_]+", "", credit.casefold()) or credit.casefold()
-        if key and key not in seen:
-            credits.append(credit)
-            seen.add(key)
-    artist = ", ".join(credits)
-
-    def annotation(match):
-        label = match.group(1) if match.group(1) is not None else match.group(2)
-        credit = re.sub(r"^(?:feat(?:uring)?\.?|ft\.?|with)\s+", "", label.strip(), flags=re.IGNORECASE)
-        credit_key = re.sub(r"[\W_]+", "", credit.casefold()) or credit.casefold()
-        return " " if credit_key in seen else match.group(0)
-
-    # Remove repeated artist credits; fit optional qualifiers per line below.
-    previous = None
-    while previous != title:
-        previous = title
-        title = re.sub(r"\(([^()]*)\)|\[([^\[\]]*)\]", annotation, title)
-    title = _obs_text(title)
-    segments = re.split(r"\s+[-–—|]\s+", title)
-    if len(segments) > 1 and _OBS_ANNOTATION.match(segments[-1]):
-        prefix = title[:list(re.finditer(r"\s+[-–—|]\s+", title))[-1].start()]
-        if prefix.count("(") == prefix.count(")") and prefix.count("[") == prefix.count("]"):
-            title = prefix
-    title = title or raw_title
-
-    original_title = title
-    # Use the full credit before individual names (e.g. Earth, Wind & Fire).
-    for credit in sorted(set([artist] + credits) - {""}, key=lambda value: (-len(value), value.casefold())):
-        name = re.escape(credit).replace(r"\ ", r"\s+")
-        previous = None
-        while previous != title:
-            previous = title
-            without_credit = re.sub(
-                rf"^\s*{name}(?!\w)(?:\s*[-–—|:,]\s*|\s+)", "", title,
-                flags=re.IGNORECASE,
-            )
-            without_credit = re.sub(
-                rf"(?:\s+[-–—|:,]\s*|\s+by\s+){name}\s*$", "", without_credit,
-                flags=re.IGNORECASE,
-            ).strip()
-            if not without_credit:
-                break
-            title = without_credit
-    return _obs_text(title or original_title), artist
+    artist, title = clean_display_names(artist, title)
+    return title, artist
 
 
 def _obs_text_width(value: str) -> float:
@@ -343,9 +296,12 @@ def write_from_state(state: Dict[str, Any]) -> None:
         )
 
         for index, song in enumerate(queue, start=1):
+            title, artist = _clean_obs_names(
+                song.get("title") or song.get("name") or "", song.get("artist"),
+            )
             queue_lines = [
-                song.get("title") or song.get("name") or "",
-                song_utils.display_artist(song.get("artist"), song.get("title") or song.get("name")),
+                title,
+                artist,
                 _stringify(song.get("votes") or 0) + (" vote" if song.get("votes") == 1 else " votes"),
                 song.get("durationFormatted")
                 or song_utils.format_seconds(song.get("duration") or 0),
