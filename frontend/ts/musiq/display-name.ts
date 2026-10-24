@@ -1,11 +1,81 @@
-/** Keep the original title when YouTube has already included the artist. */
+/** Display-only rules mirrored in core/musiq/display_name.py and shared fixtures. */
+const brackets = /\(([^()]*)\)|\[([^\[\]]*)\]/g;
+const separator = /\s+[-–—|]\s+/;
+const quality = '(?:music\\s+)?(?:hq|hd|flac|lossless|[48]k|\\d{3,4}p)';
+const junk = new RegExp('^(?:(?:(?:official|unofficial)\\s+)?' +
+  '(?:(?:music|lyric|lyrics)\\s+)?(?:video|audio|visuali[sz]er|lyrics?)' +
+  '(?:\\s+' + quality + ')?|' + quality + '(?:[\\s/,+–—-]+' + quality + ')*|' +
+  '(?:high[\\s-]*speed|sped[\\s-]*up)\\s*(?:version|ver\\.?)?|bonus\\s+tracks?)$', 'i');
+const text = value => String(value || '').normalize('NFKC').replace(/\s+/g, ' ').trim();
+const key = (value: string) => value.toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
+
+function annotations(value: string, creditKeys = new Set<string>()): string {
+  let previous: string;
+  do {
+    previous = value;
+    value = value.replace(brackets, (match, round, square) => {
+      const label = (round === undefined ? square : round).trim();
+      const credit = label.replace(/^(?:feat(?:uring)?\.?|ft\.?|with)\s+/i, '');
+      return !label || junk.test(label) || creditKeys.has(key(credit)) ? ' ' : match;
+    });
+  } while (previous !== value);
+  return text(value);
+}
+
+function segments(title: string): {parts: string[], separators: string[]} {
+  const parts: string[] = [], separators: string[] = [];
+  let start = 0, cursor = 0, depth = 0;
+  const pattern = new RegExp(separator.source, 'g');
+  let match: RegExpExecArray;
+  while ((match = pattern.exec(title))) {
+    for (const char of title.slice(cursor, match.index)) depth = Math.max(0, depth + ('(['.includes(char) ? 1 : ')]'.includes(char) ? -1 : 0));
+    cursor = pattern.lastIndex;
+    if (depth) continue;
+    parts.push(title.slice(start, match.index)); separators.push(match[0]); start = pattern.lastIndex;
+  }
+  parts.push(title.slice(start));
+  return {parts, separators};
+}
+
+export function cleanDisplayNames(artist, title): {artist: string, title: string} {
+  const rawTitle = text(title);
+  title = annotations(rawTitle) || rawTitle;
+  const label = annotations(text(artist)).replace(/\s*[-–—]\s*Topic$|VEVO$/i, '').trim();
+  const credits: string[] = [];
+  const seen = new Map<string, number>();
+  label.split(/[,;]/).forEach(value => {
+    const credit = value.replace(/\s*[-–—]\s*Topic$|VEVO$/i, '').trim();
+    const name = key(credit);
+    if (name && !seen.has(name)) { seen.set(name, credits.length); credits.push(credit); }
+  });
+  const keys = new Set(seen.keys());
+  if (credits.length) ['', ' x ', ' and '].forEach(joiner => keys.add(key(credits.join(joiner))));
+  title = annotations(title, keys) || title;
+  const {parts, separators} = segments(title);
+  while (parts.length > 1 && junk.test(parts[parts.length - 1].trim())) { parts.pop(); separators.pop(); }
+  while (parts.length > 1) {
+    const knownCredit = value => keys.has(key(value)) || value.split(/[,;]/).every(part => seen.has(key(part)));
+    const index = knownCredit(parts[0]) ? 0 : knownCredit(parts[parts.length - 1]) ? parts.length - 1 : -1;
+    if (index < 0) break;
+    const credit = parts.splice(index, 1)[0].trim();
+    separators.splice(index === 0 ? 0 : separators.length - 1, 1);
+    credit.split(/[,;]/).forEach(value => {
+      const name = value.trim(), identity = key(name);
+      if (seen.has(identity)) {
+        const old = credits[seen.get(identity)];
+        if (old === old.toLowerCase() && (name.includes(' ') || name !== name.toLowerCase())) credits[seen.get(identity)] = name;
+      }
+    });
+  }
+  title = parts.map((part, i) => part + (separators[i] || '')).join('') || title;
+  return {artist: credits.join(', '), title: text(title)};
+}
+
 export function displayArtist(artist, title): string {
-  const label = String(artist || '').replace(/\s*[-–—]\s*Topic$|VEVO$/i, '');
-  const words = value => String(value || '').normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
-  const name = words(label);
-  return name && (' ' + words(title) + ' ').includes(' ' + name + ' ') ? '' : String(artist || '');
+  return cleanDisplayNames(artist, title).artist;
 }
 
 export function displayName(song): string {
-  return [displayArtist(song.artist, song.title), song.title].filter(Boolean).join(' – ');
+  const names = cleanDisplayNames(song.artist, song.title);
+  return [names.artist, names.title].filter(Boolean).join(' – ');
 }
