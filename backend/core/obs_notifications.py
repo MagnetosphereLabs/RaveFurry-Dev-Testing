@@ -19,7 +19,7 @@ import uuid
 HOUR = 3600
 DAY = 24 * HOUR
 DISPLAY_SECONDS = 14
-COOLDOWN = 120
+COOLDOWN = 60
 HOURLY_LIMIT = 6
 MAX_PLAYS = 2048
 STATE_NAME = "obs_vote_notifications_state.json"
@@ -132,33 +132,29 @@ class Director:
         message = None
         if allowed and pending and now - pending["at"] >= (2 if pending["kind"] == "risk" else 5):
             if pending["kind"] == "risk":
-                message = {"kind": "risk", "eyebrow": "THIS ONE'S IN YOUR HANDS",
-                           "headline": "Keep it playing?",
-                           "detail": f"At {skip_at} votes, this song skips. Your vote can help.",
+                votes = current["votes"]
+                vote_label = "vote" if abs(votes) == 1 else "votes"
+                message = {"kind": "risk", "headline": "Cast your vote!",
+                           "detail": f"This song has {votes} {vote_label}. It skips at {skip_at}.",
                            "footer": "Cast your vote and add music at"}
                 watched["warned"] = True
             else:
                 headline = ["A new crowd favorite!", "Making a move!", "Into the top three!"][rank - 1]
-                detail = f"No. {rank} in today's event so far · {score} votes."
-                if rank == 2 and score >= 4 and max(totals.values()) == score + 1:
-                    detail += " One vote from a tie for the lead!"
+                detail = f"Song #{rank} in today's event so far · {score} votes."
                 message = {"kind": "rank", "rank": rank, "score": score,
-                           "eyebrow": "TODAY'S EVENT", "headline": headline,
+                           "headline": headline,
                            "detail": detail, "footer": "Cast your vote and add music at"}
                 state["watermarks"][rank - 1] = score
                 watched["bestRank"] = min(watched["bestRank"], rank)
                 watched["announcedScore"] = score
             pending = None
         elif (allowed and not pending and now - state["start"] >= HOUR
-              and now - state["lastReminder"] >= HOUR and recent_votes <= 10):
-            message = {"kind": "reminder", "eyebrow": "YOUR VOTE, YOUR EVENT",
-                       "headline": "Got a favorite?",
-                       "detail": "Your favorites can make today's event charts.",
+              and now - state["lastReminder"] >= HOUR and recent_votes <= 7):
+            message = {"kind": "reminder", "headline": "Don't forget to vote!",
+                       "detail": "Your favorite music can make today's top charts.",
                        "footer": "Cast your vote and add music at"}
             state["lastReminder"] = now
         if message:
-            if mode == "closing":
-                message["footer"] = "Cast your vote at"
             message.update(id=uuid.uuid4().hex, createdAt=now, expiresAt=now + DISPLAY_SECONDS,
                            title=current["title"] if message["kind"] != "reminder" else "",
                            artist=current["artist"] if message["kind"] != "reminder" else "")
