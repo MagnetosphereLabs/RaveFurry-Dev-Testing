@@ -3,7 +3,7 @@ import {getStoredVote, paintVotes} from './vote-state';
 import {initPanels, updateAutoPreview, refreshOpenHistory} from './panels';
 import {showPlayButton, showPauseButton, reconcileDownloadNotifications} from './buttons';
 import {syncAudioStream} from './audio';
-import {displayArtist} from './display-name';
+import {cleanDisplayNames} from './display-name';
 
 export let state = null;
 const rowAnimations = new Map<HTMLElement, Animation>();
@@ -480,13 +480,13 @@ function safeExternalUrl(url): string | undefined {
 }
 
 function insertDisplayName(element, song) {
-  const artist = displayArtist(song.artist, song.title);
+  const {artist, title} = cleanDisplayNames(song.artist, song.title);
   if (!artist) {
-    element.text(song.title);
+    element.text(title);
   } else {
     element.empty();
     element.append($('<strong/>').text(artist));
-    element.append($('<span/>').addClass('queue-song-title-text').text(' – ' + song.title));
+    element.append($('<span/>').addClass('queue-song-title-text').text(' – ' + title));
   }
 }
 
