@@ -2,12 +2,12 @@
 
 import os
 import re
-import unicodedata
 from typing import TYPE_CHECKING, Optional, TypedDict
 
 import mutagen.easymp4
 
 from core.settings import storage
+from core.musiq.display_name import clean_display_names
 from django.conf import settings as conf
 
 if TYPE_CHECKING:
@@ -85,21 +85,14 @@ def format_seconds(seconds: int) -> str:
 
 
 def display_artist(artist: str, title: str) -> str:
-    """Omit the extra artist label when the title already names that artist."""
-    artist = artist or ""
-    label = re.sub(r"\s*[-–—]\s*Topic$|VEVO$", "", artist, flags=re.IGNORECASE)
-    def words(value: str) -> str:
-        return re.sub(r"[\W_]+", " ", unicodedata.normalize("NFKC", value).casefold()).strip()
-    name, text = words(label), words(title or "")
-    return "" if name and f" {name} " in f" {text} " else artist
+    """Return cleaned credits for display, without altering stored metadata."""
+    return clean_display_names(artist, title)[0]
 
 
 def displayname(artist: str, title: str) -> str:
     """Formats the given artist and title as a presentable display name."""
-    artist = display_artist(artist, title)
-    if artist == "":
-        return title
-    return artist + " – " + title
+    artist, title = clean_display_names(artist, title)
+    return " – ".join(filter(None, (artist, title)))
 
 
 def get_metadata(path: str) -> "Metadata":
