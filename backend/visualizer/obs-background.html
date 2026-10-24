@@ -9,11 +9,84 @@
 canvas{display:block;width:100%;height:100%}
 #status{position:absolute;bottom:10px;left:12px;color:#fff;font:13px system-ui;background:#15233bcc;padding:6px 9px;border-radius:5px;pointer-events:none}
 #status[hidden]{display:none}
+
+/* A small, finite DOM composition, outside the existing WebGL scene. All
+   dimensions scale together with the 16:9 stream; no shadow or canvas copies. */
+#vote-notice{
+  --u:min(1vw,1.77778vh);--accent:169,223,241;
+  position:fixed;right:calc(var(--u)*1.2);top:calc(var(--u)*1.2);z-index:2;
+  width:calc(var(--u)*27);padding:calc(var(--u)*.75);
+  border:1px solid rgba(255,255,255,.19);border-right:2px solid rgba(var(--accent),.8);
+  border-radius:calc(var(--u)*.9);color:#f5f7fc;
+  background:linear-gradient(125deg,rgba(15,22,36,.76),rgba(13,19,32,.63));
+  -webkit-backdrop-filter:blur(26px) saturate(125%);backdrop-filter:blur(26px) saturate(125%);
+  font:500 calc(var(--u)*.86)/1.35 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+  pointer-events:none;overflow:hidden;isolation:isolate;
+  opacity:0;transform:translate(calc(var(--u)*2),calc(var(--u)*-.35)) scale(.97);
+  transform-origin:right top;
+  transition:transform 620ms cubic-bezier(.4,0,.2,1),opacity 400ms ease;
+}
+#vote-notice[hidden]{display:none}
+#vote-notice.is-visible{opacity:1;transform:translate(0,0) scale(1);transition:transform 850ms cubic-bezier(.16,1,.3,1),opacity 400ms ease}
+#vote-notice[data-rank="1"]{--accent:255,218,139}
+#vote-notice[data-rank="2"]{--accent:197,219,244}
+#vote-notice[data-rank="3"]{--accent:231,174,143}
+#vote-notice::after{
+  content:"";position:absolute;inset:0;pointer-events:none;opacity:0;
+  background:linear-gradient(110deg,transparent 35%,rgba(var(--accent),.15) 50%,transparent 65%);
+  transform:translateX(-110%);
+}
+#vote-notice[data-rank="1"].is-visible::after{animation:notice-sheen 1300ms 180ms ease-out both}
+.vote-notice-header{display:flex;align-items:center;gap:calc(var(--u)*.55)}
+.vote-notice-character{width:calc(var(--u)*2.75);height:calc(var(--u)*2.75);object-fit:contain;flex:none}
+.vote-notice-heading{flex:1;min-width:0}
+#vote-notice-eyebrow{color:rgb(var(--accent));font-size:calc(var(--u)*.52);font-weight:750;letter-spacing:.13em;line-height:1.35}
+#vote-notice-headline{margin:calc(var(--u)*.14) 0 0;font-size:calc(var(--u)*1.25);font-weight:750;line-height:1.16;letter-spacing:-.025em}
+#vote-notice-badge{
+  display:grid;place-items:center;flex:none;width:calc(var(--u)*2.15);height:calc(var(--u)*2.15);
+  border:1px solid rgba(var(--accent),.45);border-radius:50%;color:rgb(var(--accent));
+  background:rgba(var(--accent),.08);font-size:calc(var(--u)*1.03);font-weight:750;line-height:1;
+}
+#vote-notice[data-rank="1"] #vote-notice-badge{border-radius:calc(var(--u)*.65);background:linear-gradient(145deg,rgba(var(--accent),.25),rgba(var(--accent),.07))}
+#vote-notice[data-rank="1"].is-visible #vote-notice-badge{animation:notice-gold 1050ms cubic-bezier(.16,1,.3,1) both}
+#vote-notice[data-rank="2"].is-visible #vote-notice-badge{animation:notice-silver 800ms cubic-bezier(.16,1,.3,1) both}
+#vote-notice[data-rank="3"].is-visible #vote-notice-badge{animation:notice-bronze 650ms cubic-bezier(.16,1,.3,1) both}
+.vote-notice-song{display:flex;align-items:baseline;gap:calc(var(--u)*.35);margin-top:calc(var(--u)*.35);min-width:0}
+#vote-notice-title,#vote-notice-artist{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#vote-notice-title{flex:0 1 auto;min-width:0;font-size:calc(var(--u)*.85);font-weight:650}
+#vote-notice-artist{flex:0 1 auto;max-width:40%;font-size:calc(var(--u)*.66);color:#c0cbd8}
+#vote-notice[data-kind="reminder"] .vote-notice-song{display:none}
+#vote-notice-detail{margin:calc(var(--u)*.4) 0 0;color:#e0e7ef;font-size:calc(var(--u)*.81);line-height:1.35}
+.vote-notice-footer{display:flex;align-items:baseline;flex-wrap:wrap;gap:calc(var(--u)*.3);margin-top:calc(var(--u)*.35);padding-top:calc(var(--u)*.3);border-top:1px solid rgba(255,255,255,.12)}
+#vote-notice-footer{font-size:calc(var(--u)*.6);color:#c0cbd8}
+.vote-notice-url{font-size:calc(var(--u)*.86);font-weight:750;color:rgb(var(--accent));letter-spacing:-.02em}
+@keyframes notice-sheen{0%{opacity:0;transform:translateX(-110%)}25%{opacity:1}100%{opacity:0;transform:translateX(110%)}}
+@keyframes notice-gold{0%{opacity:0;transform:translateY(25%) rotate(-14deg) scale(.65)}60%{opacity:1;transform:translateY(0) rotate(3deg) scale(1.07)}100%{opacity:1;transform:none}}
+@keyframes notice-silver{0%{opacity:0;transform:translateX(-25%) scale(.8)}100%{opacity:1;transform:none}}
+@keyframes notice-bronze{0%{opacity:0;transform:translateY(20%) scale(.9)}100%{opacity:1;transform:none}}
+@media(prefers-reduced-motion:reduce){
+  #vote-notice,#vote-notice.is-visible{transform:translate(0,0);transition:opacity 180ms ease}
+  #vote-notice.is-visible::after,#vote-notice.is-visible #vote-notice-badge{animation:none!important}
+}
 </style>
 </head>
 <body>
 <canvas id="background" role="img" aria-label="FURATIC colored gas clouds with music-reactive lighting"></canvas>
 <div id="status" hidden></div>
+
+<aside id="vote-notice" hidden aria-hidden="true" role="status" aria-live="polite">
+  <div class="vote-notice-header">
+    <img class="vote-notice-character" width="128" height="128" decoding="async" alt="" src="data:image/png;base64,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">
+    <div class="vote-notice-heading">
+      <div id="vote-notice-eyebrow"></div>
+      <h2 id="vote-notice-headline"></h2>
+    </div>
+    <div id="vote-notice-badge" aria-hidden="true"></div>
+  </div>
+  <div class="vote-notice-song"><div id="vote-notice-title"></div><div id="vote-notice-artist"></div></div>
+  <p id="vote-notice-detail"></p>
+  <div class="vote-notice-footer"><span id="vote-notice-footer"></span><strong class="vote-notice-url">furatic.xyz</strong></div>
+</aside>
 <script>
 (() => {
   'use strict';
@@ -1183,5 +1256,6 @@ canvas{display:block;width:100%;height:100%}
   if(visible){if(!simulated){connect();connectScene();}raf=requestAnimationFrame(frame);}
 })();
 </script>
+<script src="obs-notifications.js" defer></script>
 </body>
 </html>
