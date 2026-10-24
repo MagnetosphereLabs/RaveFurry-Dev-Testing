@@ -1,4 +1,5 @@
 import {displayName} from './display-name';
+import {PreviewScroller} from './preview-scroll';
 
 /** One transition owner keeps mutually exclusive drawers from crossing each other. */
 export type Panel = 'auto' | 'history' | null;
@@ -88,18 +89,21 @@ type Artwork = {node: HTMLElement, occurrence: string, bounds: DOMRect};
 type PreQueueStart = {bounds: DOMRect, preview: DOMRect, content: DOMRect, artwork: Artwork[], labels: {node: HTMLElement, bounds: DOMRect}[]};
 let previewObserver: ResizeObserver;
 let preQueueMorphing = false;
+let previewScroller: PreviewScroller;
 
 function fitAutoPreview() {
   const preview = document.getElementById('auto-queue-preview');
-  if (!preview || preQueueMorphing || document.getElementById('auto-queue-dock').classList.contains('is-expanded')) return;
+  if (!preview || preQueueMorphing) return;
   const vertical = desktopLayout();
+  if (vertical && document.getElementById('auto-queue-dock').classList.contains('is-expanded')) return;
   const space = vertical ? preview.clientHeight : preview.clientWidth;
   const tile = vertical ? preview.clientWidth : 44;
   if (!space || !tile) return;
   const style = getComputedStyle(preview);
   const gap = parseFloat(vertical ? style.rowGap : style.columnGap) || 0;
-  const count = Math.min(10, Math.max(0, Math.floor((space + gap) / (tile + gap))));
+  const count = vertical ? 20 : Math.min(10, Math.max(0, Math.floor((space + gap) / (tile + gap))));
   Array.from(preview.children).forEach((node: HTMLElement, index) => { node.hidden = index >= count; });
+  previewScroller?.layout(vertical);
 }
 
 function captureArtwork(): Artwork[] {
@@ -114,6 +118,7 @@ function captureArtwork(): Artwork[] {
 }
 
 function capturePreQueue(): PreQueueStart {
+  previewScroller?.stop();
   const dock = document.getElementById('auto-queue-dock');
   const preview = document.getElementById('auto-queue-preview');
   return {bounds: dock.getBoundingClientRect(), preview: preview.getBoundingClientRect(),
@@ -144,6 +149,18 @@ async function morphPreQueue(start: PreQueueStart, opening: boolean, reduced: bo
     Object.assign(content.style, {position: 'absolute', left: contentBounds.left - contentOrigin.left + 'px',
       top: contentBounds.top - contentOrigin.top + 'px', width: contentBounds.width + 'px', height: contentBounds.height + 'px'});
     fitAutoPreview();
+    // Continue from the same song after scrolling, so the existing artwork
+    // morph still has matching destinations instead of fading every tile out.
+    const first = start.artwork[0];
+    const target = opening ? content.querySelector<HTMLElement>('.furatic-list-scroll') : preview;
+    const destination = first && Array.from((opening ? content : preview)
+        .querySelectorAll<HTMLElement>(opening ? '.queue-artwork' : '.auto-queue-thumbnail'))
+        .find(node => node.closest<HTMLElement>('[data-occurrence-id]')?.dataset.occurrenceId === first.occurrence);
+    if (target && destination) {
+      if (opening) target.scrollTop += destination.getBoundingClientRect().top - target.getBoundingClientRect().top;
+      else target.scrollTop = destination.offsetTop;
+      if (!opening) fitAutoPreview();
+    }
     const destinationArtwork = captureArtwork();
     preQueueMorphing = true;
     const previewBounds = opening ? start.preview : preview.getBoundingClientRect();
@@ -156,6 +173,8 @@ async function morphPreQueue(start: PreQueueStart, opening: boolean, reduced: bo
     animations.push(dock.animate([{width: start.bounds.width + 'px'}, {width: end.width + 'px'}], timing));
     start.artwork.forEach(source => {
       const destination = destinationArtwork.find(item => item.occurrence === source.occurrence);
+      const sourceOpacity = getComputedStyle(source.node).opacity;
+      const destinationOpacity = destination ? getComputedStyle(destination.node).opacity : '0';
       const layer = source.node.cloneNode(true) as HTMLElement;
       layer.removeAttribute('id'); layer.removeAttribute('href'); layer.setAttribute('aria-hidden', 'true');
       layer.removeAttribute('data-occurrence-id');
@@ -164,13 +183,15 @@ async function morphPreQueue(start: PreQueueStart, opening: boolean, reduced: bo
         width: source.bounds.width + 'px', height: source.bounds.height + 'px', minWidth: '0', maxWidth: 'none',
         margin: '0', objectFit: 'cover', borderRadius: '8px', overflow: 'hidden', zIndex: '20', pointerEvents: 'none',
         transformOrigin: 'top left', transition: 'none', animation: 'none'});
+      // The source bounds already include the preview's edge scaling.
+      layer.style.transform = 'none'; layer.style.opacity = sourceOpacity;
       document.body.appendChild(layer); artworkLayers.push(layer);
       [source.node, destination?.node].filter(Boolean).forEach(node => {
         hiddenArtwork.push({node, visibility: node.style.visibility}); node.style.visibility = 'hidden';
       });
-      animations.push(layer.animate(destination ? [{transform: 'translate(0px, 0px) scale(1, 1)'},
-        {transform: `translate(${destination.bounds.left - source.bounds.left}px, ${destination.bounds.top - source.bounds.top}px) scale(${destination.bounds.width / source.bounds.width}, ${destination.bounds.height / source.bounds.height})`}] :
-        [{opacity: 1}, {opacity: 0, offset: .6}, {opacity: 0}], timing));
+      animations.push(layer.animate(destination ? [{transform: 'translate(0px, 0px) scale(1, 1)', opacity: sourceOpacity},
+        {transform: `translate(${destination.bounds.left - source.bounds.left}px, ${destination.bounds.top - source.bounds.top}px) scale(${destination.bounds.width / source.bounds.width}, ${destination.bounds.height / source.bounds.height})`, opacity: destinationOpacity}] :
+        [{opacity: sourceOpacity}, {opacity: 0, offset: .6}, {opacity: 0}], timing));
     });
     animations.push(preview.animate(opening ?
       [{opacity: 1}, {opacity: 0, offset: .35}, {opacity: 0}] :
@@ -252,6 +273,9 @@ export function initPanels(renderer: (songs: any[]) => void) {
   if (!document.getElementById('auto-drawer')) return;
   renderHistory = renderer;
   controller = new DrawerController(transition);
+  previewScroller = new PreviewScroller(document.getElementById('auto-queue-preview'),
+    document.getElementById('auto-queue-scroll-up') as HTMLButtonElement,
+    document.getElementById('auto-queue-scroll-down') as HTMLButtonElement);
   if (typeof ResizeObserver !== 'undefined') {
     previewObserver = new ResizeObserver(fitAutoPreview);
     previewObserver.observe(document.getElementById('auto-queue-preview'));
@@ -268,6 +292,7 @@ export function initPanels(renderer: (songs: any[]) => void) {
       const home = document.querySelector(desktop ? '#auto-queue-dock' : '.furatic-queue-middle');
       if (autoDrawer.parentElement !== home) home.insertBefore(autoDrawer, desktop ? null : document.getElementById('history-drawer'));
       document.getElementById('main-queue-scroll').toggleAttribute('inert', !desktop && Boolean(controller.active));
+      if (!desktop) previewScroller.layout(false);
       parentPanels()?.setDrawer((window as any).furaticQueuePanels.current());
       fitAutoPreview();
     },
@@ -300,10 +325,16 @@ export function initPanels(renderer: (songs: any[]) => void) {
 export function updateAutoPreview(songs: any[]) {
   const preview = document.getElementById('auto-queue-preview');
   if (!preview) return;
-  const first = songs.slice(0, 10);
+  const first = songs.slice(0, 20);
   preview.classList.toggle('is-empty', first.length === 0);
   const key = JSON.stringify(first.map(s => [s.occurrenceId, s.artworkUrl, s.artist, s.title]));
   if (preview.dataset.previewKey !== key) {
+    previewScroller?.stop();
+    const scrollTop = preview.scrollTop;
+    const anchor = Array.from(preview.querySelectorAll<HTMLElement>('.auto-queue-thumbnail'))
+        .find(node => node.offsetTop + node.offsetHeight > scrollTop);
+    const anchorId = anchor?.dataset.occurrenceId;
+    const anchorOffset = anchor ? scrollTop - anchor.offsetTop : 0;
     preview.dataset.previewKey = key;
     preview.replaceChildren(...first.map(song => {
       const link = document.createElement('a');
@@ -323,6 +354,12 @@ export function updateAutoPreview(songs: any[]) {
       return link;
     }));
     if (!first.length) preview.textContent = 'No extra songs waiting.';
+    // Polls and promotions must not jump a scrolled preview back to its start.
+    if (desktopLayout()) {
+      const replacement = Array.from(preview.querySelectorAll<HTMLElement>('.auto-queue-thumbnail'))
+          .find(node => node.dataset.occurrenceId === anchorId);
+      preview.scrollTop = replacement ? replacement.offsetTop + anchorOffset : scrollTop;
+    }
   }
   document.getElementById('auto-queue-count').textContent = String(songs.length);
   document.getElementById('auto-queue-empty').hidden = songs.length > 0;
