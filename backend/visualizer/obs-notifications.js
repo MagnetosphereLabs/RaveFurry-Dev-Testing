@@ -10,7 +10,7 @@
   if (!Number.isInteger(port) || port < 1024 || port > 65535) return;
   const endpoint = `http://127.0.0.1:${port}/vote-notification.json`;
   const fields = {};
-  for (const name of ['eyebrow', 'headline', 'title', 'artist', 'detail', 'footer', 'badge']) {
+  for (const name of ['headline', 'title', 'artist', 'detail', 'footer', 'badge', 'ordinal']) {
     fields[name] = document.getElementById(`vote-notice-${name}`);
   }
   const storageKey = 'furatic.obs.vote-notice.v1';
@@ -24,18 +24,84 @@
   let pollTimer = 0, hideTimer = 0, releaseTimer = 0, requestTimer = 0;
   let controller = null, active = '', generation = 0;
   const visible = () => !stopped && obsVisible && contextReady && !document.hidden;
+  const motion = new Set();
+  const sheen = root.querySelector('.vote-notice-sheen');
+  const easing = 'cubic-bezier(.16,1,.3,1)';
+
+  function cancelMotion() {
+    for (const animation of motion) {
+      animation.onfinish = animation.oncancel = null;
+      animation.cancel();
+    }
+    motion.clear();
+  }
+
+  function animate(element, frames, timing) {
+    // Finite, explicitly owned broadcast animations. OBS can inherit Windows'
+    // reduced-motion preference; it must not silently remove the stream effects.
+    // Only transforms/opacity animate; blur and geometry stay fixed.
+    if (!element || typeof element.animate !== 'function') return;
+    const animation = element.animate(frames, {...timing, fill: 'backwards'});
+    motion.add(animation);
+    const release = () => {
+      motion.delete(animation);
+      animation.onfinish = animation.oncancel = null;
+      animation.cancel();
+    };
+    animation.onfinish = animation.oncancel = release;
+  }
+
+  function enter(rank) {
+    cancelMotion();
+    animate(root, [
+      {opacity: 0, transform: 'translate(1.5em,-.25em) scale(.97)'},
+      {opacity: 1, transform: 'translate(0,0) scale(1)'},
+    ], {duration: rank === 1 ? 1050 : rank ? 900 : 820, easing});
+    if (rank === 1) {
+      animate(fields.badge, [
+        {opacity: 0, transform: 'translateY(18%) rotate(-8deg) scale(.76)', offset: 0},
+        {opacity: 1, transform: 'translateY(0) rotate(2deg) scale(1.04)', offset: .72},
+        {opacity: 1, transform: 'translateY(0) rotate(0) scale(1)', offset: 1},
+      ], {duration: 1150, delay: 100, easing});
+      animate(sheen, [
+        {opacity: 0, transform: 'translateX(-120%)', offset: 0},
+        {opacity: 1, transform: 'translateX(-75%)', offset: .25},
+        {opacity: 0, transform: 'translateX(120%)', offset: 1},
+      ], {duration: 1450, delay: 250, easing: 'ease-out'});
+    } else if (rank === 2) {
+      animate(fields.badge, [
+        {opacity: 0, transform: 'translateX(-18%) scale(.88)'},
+        {opacity: 1, transform: 'translateX(0) scale(1)'},
+      ], {duration: 900, delay: 100, easing});
+    } else if (rank === 3) {
+      animate(fields.badge, [
+        {opacity: 0, transform: 'translateY(16%) scale(.92)'},
+        {opacity: 1, transform: 'translateY(0) scale(1)'},
+      ], {duration: 800, delay: 100, easing});
+    }
+  }
 
   function hide(immediate = false) {
     clearTimeout(hideTimer); clearTimeout(releaseTimer);
     hideTimer = releaseTimer = 0;
+    const showing = !root.hidden;
+    // Read the actual in-flight pose before cancelling an interrupted entrance.
+    const style = showing && !immediate ? getComputedStyle(root) : null;
+    const from = style ? {opacity: style.opacity, transform: style.transform} : null;
+    cancelMotion();
     active = '';
     root.classList.remove('is-visible');
     root.setAttribute('aria-hidden', 'true');
-    if (immediate) root.hidden = true;
-    else releaseTimer = setTimeout(() => {
-      releaseTimer = 0;
-      root.hidden = true; // Releases the blurred compositor surface after exit.
-    }, 650);
+    if (immediate || !showing) root.hidden = true;
+    else {
+      animate(root, [from, {opacity: 0, transform: 'translate(.9em,-.15em) scale(.985)'}],
+        {duration: 650, easing: 'cubic-bezier(.4,0,.6,1)'});
+      releaseTimer = setTimeout(() => {
+        releaseTimer = 0;
+        cancelMotion();
+        root.hidden = true; // Releases the blurred compositor surface after exit.
+      }, 650);
+    }
   }
 
   function receive(value) {
@@ -51,26 +117,26 @@
     if (active || !visible() || typeof message.id !== 'string' || message.id === seen ||
         !Number.isFinite(message.createdAt) || now < message.createdAt || now - message.createdAt > 6 ||
         message.expiresAt - message.createdAt > 14.1 ||
-        (lastShown && now - lastShown < 180) ||
+        (lastShown && now - lastShown < 60) ||
         !['rank', 'risk', 'reminder'].includes(message.kind)) return;
     const rank = message.kind === 'rank' ? message.rank : 0;
     if (message.kind === 'rank' && ![1, 2, 3].includes(rank)) return;
-    for (const name of ['eyebrow', 'headline', 'detail', 'footer']) {
+    for (const name of ['headline', 'detail', 'footer']) {
       if (typeof message[name] !== 'string' || message[name].length > 240) return;
     }
     clearTimeout(releaseTimer); releaseTimer = 0;
-    for (const name of ['eyebrow', 'headline', 'title', 'artist', 'detail', 'footer']) {
+    for (const name of ['headline', 'title', 'artist', 'detail', 'footer']) {
       // Metadata is text, never HTML. One fixed card is reused for every notice.
       fields[name].textContent = typeof message[name] === 'string' ? message[name].slice(0, 240) : '';
     }
-    fields.badge.textContent = rank ? `0${rank}` : '↑';
+    fields.ordinal.textContent = rank ? ['', '1st', '2nd', '3rd'][rank] : '';
     root.dataset.rank = String(rank);
     root.dataset.kind = message.kind;
     root.classList.remove('is-visible');
     root.hidden = false;
-    void root.offsetWidth; // One layout on entry, never work in the render loop.
     root.classList.add('is-visible');
     root.setAttribute('aria-hidden', 'false');
+    enter(rank);
     active = seen = message.id;
     lastShown = now;
     try { localStorage.setItem(storageKey, JSON.stringify({id: seen, at: now})); } catch (_) { /* optional */ }
