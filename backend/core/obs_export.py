@@ -155,6 +155,8 @@ def _song_lines(position, duration, title, artist, votes) -> List[str]:
 
 def start() -> None:
     """Keep the timestamp independent of playback, downloads and queue exports."""
+    from core import obs_notifications
+    obs_notifications.start()
     global _worker
     with _worker_lock:
         if _worker is not None and _worker.is_alive():
@@ -166,6 +168,8 @@ def start() -> None:
 
 def stop() -> None:
     _stop.set()
+    from core import obs_notifications
+    obs_notifications.stop()
 
 
 def _tick_loop() -> None:
