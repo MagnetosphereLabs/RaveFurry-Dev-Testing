@@ -1590,6 +1590,24 @@
     html.furatic-desktop-panels #auto-queue-toggle > i { transform: rotate(-90deg); }
     html.furatic-desktop-panels #auto-queue-toggle[aria-expanded="true"] > i { transform: rotate(90deg); }
     html.furatic-desktop-panels #auto-queue-preview { grid-template-columns: 1fr; grid-auto-rows: min-content; align-content: start; flex: 1 1 0; width: 100%; overflow: hidden; min-height: 0; text-align: center; }
+    html.furatic-desktop-panels #auto-queue-dock:not(.is-expanded) #auto-queue-preview {
+        position: relative; overflow-x: hidden; overflow-y: auto; overscroll-behavior-y: contain;
+        scrollbar-width: none; touch-action: pan-y;
+    }
+    html.furatic-desktop-panels #auto-queue-preview::-webkit-scrollbar { display: none; }
+    html.furatic-desktop-panels #auto-queue-preview .auto-queue-thumbnail {
+        transition: none; will-change: transform, opacity;
+    }
+    #auto-queue-preview:focus-visible { outline: 2px solid var(--furatic-text); outline-offset: -2px; border-radius: 8px; }
+    .auto-queue-scroll-control { display: none; }
+    html.furatic-desktop-panels #auto-queue-dock:not(.is-expanded) .auto-queue-scroll-control:not([hidden]) {
+        position: absolute; left: 50%; transform: translate(-50%, -50%); z-index: 2;
+        display: grid; place-items: center; width: 28px; height: 28px; padding: 0;
+        border-radius: 50%; border: 1px solid rgba(255,255,255,.45); color: var(--furatic-text);
+        background: rgba(15,18,33,.82); box-shadow: 0 2px 12px rgba(0,0,0,.25); cursor: pointer;
+    }
+    .auto-queue-scroll-control:focus-visible { outline: 2px solid var(--furatic-text); outline-offset: 2px; }
+    .auto-queue-scroll-control[hidden] { display: none !important; }
     html.furatic-desktop-panels #auto-queue-preview.is-empty { writing-mode: horizontal-tb; width: 100%; line-height: 1.4; }
     html.furatic-desktop-panels .auto-queue-thumbnail { flex-shrink: 0; width: 100%; height: auto; min-height: 0; aspect-ratio: 1; }
     html.furatic-desktop-panels .auto-queue-expanded-note { display: none; }
@@ -1691,7 +1709,9 @@
     </div>
     <section id="auto-queue-dock" class="list-group-item" aria-label="pre-queue preview">
         <button id="auto-queue-toggle" type="button" aria-expanded="false" aria-controls="auto-drawer"><strong><span class="auto-queue-label"><span>pre-queue</span></span> <span id="auto-queue-count">0</span></strong><i class="fas fa-chevron-up" aria-hidden="true"></i></button>
-        <div id="auto-queue-preview">No extra songs waiting.</div>
+        <div id="auto-queue-preview" role="region" aria-label="Pre-queue song previews">No extra songs waiting.</div>
+        <button id="auto-queue-scroll-up" class="auto-queue-scroll-control" type="button" aria-label="Scroll pre-queue up one song" aria-controls="auto-queue-preview" hidden><i class="fas fa-chevron-up" aria-hidden="true"></i></button>
+        <button id="auto-queue-scroll-down" class="auto-queue-scroll-control" type="button" aria-label="Scroll pre-queue down one song" aria-controls="auto-queue-preview" hidden><i class="fas fa-chevron-down" aria-hidden="true"></i></button>
         <p class="auto-queue-expanded-note">Voting starts after it enters the main queue.</p>
         <section id="auto-drawer" class="furatic-queue-drawer" aria-label="pre-queue" aria-hidden="true" hidden inert>
             <p class="furatic-drawer-note">Voting starts after it enters the main queue.</p>
