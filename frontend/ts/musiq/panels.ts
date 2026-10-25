@@ -36,46 +36,6 @@ export class DrawerController {
 }
 
 let controller: DrawerController;
-let historyCursor: number | null = null;
-let historyBusy = false;
-let historyLoadedAt = 0;
-let historySongs: any[] = [];
-let renderHistory: (songs: any[]) => void;
-
-async function loadHistory(more = false) {
-  if (historyBusy) return;
-  historyBusy = true;
-  const status = document.getElementById('history-status');
-  const button = document.getElementById('history-more') as HTMLButtonElement;
-  if (button) button.disabled = true;
-  if (status && !historySongs.length) status.textContent = 'Loading recently played songs…';
-  const abort = new AbortController();
-  const timeout = window.setTimeout(() => abort.abort(), 9000);
-  try {
-    const url = new URL(urls['musiq']['played-history'], window.location.href);
-    if (more && historyCursor) url.searchParams.set('before', String(historyCursor));
-    const response = await fetch(url.toString(), {credentials: 'same-origin', cache: 'no-store', signal: abort.signal});
-    if (!response.ok) throw new Error('History is temporarily unavailable.');
-    const result = await response.json();
-    historyCursor = result.nextCursor || null;
-    historySongs = more ? historySongs.concat(result.songs || []) : result.songs || [];
-    const seen = new Set();
-    const cutoff = Date.now() - 12 * 3600000;
-    historySongs = historySongs.filter(song => Date.parse(song.endedAt) >= cutoff &&
-      !seen.has(song.id) && Boolean(seen.add(song.id)));
-    renderHistory(historySongs);
-    historyLoadedAt = Date.now();
-    if (status) status.textContent = historySongs.length ? '' : 'No songs have played in the last 12 hours.';
-    if (button) button.hidden = !historyCursor;
-  } catch (_error) {
-    if (status) status.textContent = 'History could not load. Close and reopen it to try again.';
-  } finally {
-    window.clearTimeout(timeout);
-    historyBusy = false;
-    if (button) button.disabled = false;
-  }
-}
-
 function desktopLayout(): boolean {
   return document.documentElement.classList.contains('furatic-desktop-panels');
 }
@@ -224,17 +184,27 @@ async function morphPreQueue(start: PreQueueStart, opening: boolean, reduced: bo
 }
 
 
+function coverMainQueue(covered: boolean) {
+  const queue = document.getElementById('main-queue-scroll');
+  if (document.getElementById('queue-timeline')) {
+    // The playing card now shares this viewport. Keep it usable above the
+    // mobile pre-queue, while the covered song lists cannot receive focus.
+    queue.removeAttribute('inert');
+    queue.dataset.panelCovered = String(covered);
+    queue.querySelectorAll('#song-queue, #history-song-queue').forEach(list => list.toggleAttribute('inert', covered));
+  } else queue.toggleAttribute('inert', covered);
+  document.dispatchEvent(new CustomEvent('furatic:queue-panel-change'));
+}
+
 async function transition(panel: Panel, opening: boolean): Promise<void> {
   const element = document.getElementById(panel + '-drawer');
   if (!element) return;
   if (opening && desktopLayout()) await parentPanels()?.beforeDrawer();
   const desktop = desktopLayout();
   const preQueueStart = panel === 'auto' && desktop ? capturePreQueue() : null;
-  document.documentElement.classList.toggle('furatic-history-open', desktop && panel === 'history' && opening);
   if (desktop) parentPanels()?.setDrawer(opening ? panel : null);
-  const historyButton = document.getElementById('queue-history-button');
   const autoButton = document.getElementById('auto-queue-toggle');
-  const control = panel === 'auto' ? autoButton : historyButton;
+  const control = autoButton;
   if (control) control.setAttribute('aria-expanded', String(opening));
   if (panel === 'auto') {
     document.getElementById('auto-queue-dock').classList.toggle('is-expanded', opening);
@@ -244,10 +214,8 @@ async function transition(panel: Panel, opening: boolean): Promise<void> {
   element.hidden = false;
   element.setAttribute('aria-hidden', String(!opening));
   element.toggleAttribute('inert', !opening);
-  const queue = document.getElementById('main-queue-scroll');
-  queue.toggleAttribute('inert', opening && !desktop);
+  coverMainQueue(opening && !desktop);
   if (opening) element.classList.add('is-open'); else element.classList.remove('is-open');
-  if (opening && panel === 'history' && Date.now() - historyLoadedAt > 10000) loadHistory();
   const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   if (preQueueStart) {
     await morphPreQueue(preQueueStart, opening, reduced);
@@ -269,9 +237,8 @@ async function transition(panel: Panel, opening: boolean): Promise<void> {
   });
 }
 
-export function initPanels(renderer: (songs: any[]) => void) {
+export function initPanels(_renderer?: (songs: any[]) => void) {
   if (!document.getElementById('auto-drawer')) return;
-  renderHistory = renderer;
   controller = new DrawerController(transition);
   previewScroller = new PreviewScroller(document.getElementById('auto-queue-preview'),
     document.getElementById('auto-queue-scroll-up') as HTMLButtonElement,
@@ -286,12 +253,10 @@ export function initPanels(renderer: (songs: any[]) => void) {
     setDesktop: (desktop: boolean) => {
       document.documentElement.classList.toggle('furatic-desktop-panels', desktop);
       document.documentElement.classList.toggle('furatic-mobile-compact', !desktop);
-      document.documentElement.classList.toggle('furatic-history-open', desktop && controller.active === 'history' &&
-        document.getElementById('history-drawer').classList.contains('is-open'));
       const autoDrawer = document.getElementById('auto-drawer');
       const home = document.querySelector(desktop ? '#auto-queue-dock' : '.furatic-queue-middle');
-      if (autoDrawer.parentElement !== home) home.insertBefore(autoDrawer, desktop ? null : document.getElementById('history-drawer'));
-      document.getElementById('main-queue-scroll').toggleAttribute('inert', !desktop && Boolean(controller.active));
+      if (autoDrawer.parentElement !== home) home.appendChild(autoDrawer);
+      coverMainQueue(!desktop && Boolean(controller.active));
       if (!desktop) previewScroller.layout(false);
       parentPanels()?.setDrawer((window as any).furaticQueuePanels.current());
       fitAutoPreview();
@@ -300,24 +265,11 @@ export function initPanels(renderer: (songs: any[]) => void) {
     setVisibleHeight: (height: number) => document.documentElement.style.setProperty('--furatic-visible-height', height + 'px'),
   };
   parentPanels()?.syncLayout();
-  document.getElementById('queue-history-button').addEventListener('click', () => controller.toggle('history'));
   document.getElementById('auto-queue-toggle').addEventListener('click', () => controller.toggle('auto'));
-  document.getElementById('history-close').addEventListener('click', () => {
-    controller.show(null);
-    document.getElementById('queue-history-button').focus();
-  });
-  document.getElementById('history-more').addEventListener('click', () => loadHistory(true));
-  window.setInterval(() => {
-    const filtered = historySongs.filter(song => Date.parse(song.endedAt) >= Date.now() - 12 * 3600000);
-    if (filtered.length !== historySongs.length) {
-      historySongs = filtered; renderHistory(historySongs);
-      if (!filtered.length) document.getElementById('history-status').textContent = 'No songs have played in the last 12 hours.';
-    }
-  }, 60000);
   document.addEventListener('keydown', event => {
     if (event.key === 'Escape' && controller.desired) {
       controller.show(null);
-      document.getElementById('queue-history-button').focus();
+      document.getElementById('auto-queue-toggle').focus();
     }
   });
 }
@@ -364,8 +316,4 @@ export function updateAutoPreview(songs: any[]) {
   document.getElementById('auto-queue-count').textContent = String(songs.length);
   document.getElementById('auto-queue-empty').hidden = songs.length > 0;
   fitAutoPreview();
-}
-
-export function refreshOpenHistory() {
-  if (controller && controller.desired === 'history') loadHistory();
 }
