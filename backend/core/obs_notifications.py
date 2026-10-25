@@ -92,9 +92,11 @@ class Director:
         available = (mode in ("event", "closing") and enabled and current is not None
                      and current["votes"] > skip_at)
         pending = state["pending"]
-        if same and not self.rebase and available:
+        if not self.rebase and available:
             votes = current["votes"]
-            if votes > watched["votes"] and votes > watched["peak"]:
+            # A new playback can qualify with votes earned in the queue.
+            # Later achievements still require a new peak during playback.
+            if not same or (votes > watched["votes"] and votes > watched["peak"]):
                 if (votes >= 3 and unique and rank <= 3
                         and score > state["watermarks"][rank - 1]
                         and (rank < watched["bestRank"] or
