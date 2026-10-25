@@ -1,4 +1,4 @@
-import {updateState} from './musiq/update';
+import {updateState, initHistoryTimeline} from './musiq/update';
 import {initPanels} from './musiq/panels';
 import {onReady as initTitles} from './musiq/title-scrolling';
 
@@ -240,6 +240,7 @@ export function onReady() {
     beforeDrawer: () => Promise.resolve(),
   };
   initPanels(() => {});
+  initHistoryTimeline();
   initTitles();
   document.querySelector('.furatic-embed-shell').classList.add('furatic-shell-mounted', 'furatic-intro-complete');
   input.removeAttribute('autofocus');
