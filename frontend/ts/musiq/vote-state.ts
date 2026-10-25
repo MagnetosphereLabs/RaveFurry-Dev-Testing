@@ -32,8 +32,10 @@ export function paintVotes() {
     const vote = votes.get(occurrence);
     const extra = row.dataset.priorityTier === 'extra';
     row.querySelectorAll<HTMLElement>('.vote-up, .vote-down').forEach(button => {
+      if (row.dataset.historyId) button.dataset.furaticOwnVoteBlocked = String(vote?.eligible === false);
       button.classList.toggle('pressed', Boolean(vote && (button.classList.contains('vote-up') ? vote.choice > 0 : vote.choice < 0)));
-      const disabled = extra || !vote || pending.has(occurrence) || button.dataset.furaticOwnVoteBlocked === 'true';
+      const disabled = extra || !vote || vote.eligible === false || row.dataset.historyPending === 'true' ||
+        pending.has(occurrence) || button.dataset.furaticOwnVoteBlocked === 'true';
       button.dataset.voteKnown = String(Boolean(vote));
       button.setAttribute('aria-disabled', String(disabled));
       button.dataset.votePending = String(pending.has(occurrence));
