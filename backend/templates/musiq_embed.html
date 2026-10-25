@@ -1530,7 +1530,7 @@
     .auto-queue-expanded-note { position: absolute; left: 12px; right: 12px; bottom: 15px; color: var(--furatic-muted); font-size: .8rem; opacity: 0; pointer-events: none; transition: opacity var(--queue-panel-duration, 420ms) cubic-bezier(.4,0,.2,1); margin: 0; }
     #auto-queue-dock.is-expanded #auto-queue-preview { opacity: 0; transform: translateY(6px); pointer-events: none; }
     #auto-queue-dock.is-expanded .auto-queue-expanded-note { opacity: 1; }
-    #auto-song-queue .queue-vote-cluster .vote-up, #auto-song-queue .queue-vote-cluster .vote-down, #history-song-queue .queue-info-controls { display: none !important; }
+    #auto-song-queue .queue-vote-cluster .vote-up, #auto-song-queue .queue-vote-cluster .vote-down { display: none !important; }
     #auto-song-queue .queue-vote-cluster { min-width: 2ch; }
     .vote-up[aria-disabled="true"], .vote-down[aria-disabled="true"] { opacity: .65; }
     #furatic-closing-banner { flex: 0 0 auto; overflow-y: auto; }
@@ -1580,9 +1580,6 @@
         display: flex; flex-direction: column; align-items: center; gap: 12px;
         transition: width 600ms cubic-bezier(.4,0,.2,1), left 600ms cubic-bezier(.4,0,.2,1);
     }
-    html.furatic-desktop-panels.furatic-history-open #auto-queue-dock {
-        left: calc(var(--desktop-side-space, 136px) - 118px);
-    }
     html.furatic-desktop-panels #auto-queue-toggle { flex-direction: column-reverse; gap: 14px; padding: 0; }
     html.furatic-desktop-panels #auto-queue-toggle strong { writing-mode: horizontal-tb; transform: none; white-space: normal; text-align: center; line-height: 1.2; }
     html.furatic-desktop-panels .auto-queue-label > span { display: block; }
@@ -1625,7 +1622,7 @@
         z-index: auto; border: 0; border-radius: 0; box-shadow: none; background: transparent; backdrop-filter: none;
         clip-path: none; transform: none; transition: none; }
     #auto-queue-dock #auto-drawer[hidden] { display: none; }
-    #auto-queue-dock, #history-drawer { border-radius: var(--furatic-panel-radius) !important; }
+    #auto-queue-dock { border-radius: var(--furatic-panel-radius) !important; }
     #auto-queue-dock::before { border-radius: calc(var(--furatic-panel-radius) - 1px); }
     .queue-title .furatic-title-content > strong,
     .queue-title .furatic-title-content > span { display: inline !important; line-height: 1.18 !important; vertical-align: middle !important; }
@@ -1645,12 +1642,43 @@
         html.furatic-mobile-compact .auto-queue-thumbnail { height: 24px; }
     }
     @media (prefers-reduced-motion: reduce) { #content { transition: none; } }
+    /* The existing cards now share a single past/playing/upcoming viewport. */
+    .furatic-embed-shell { --timeline-gutter: 8px; }
+    html.furatic-framed .furatic-embed-shell { --timeline-gutter: 18px; }
+    .furatic-queue-middle { margin-left: calc(-1 * var(--timeline-gutter)); margin-right: calc(-1 * var(--timeline-gutter)); }
+    #queue-timeline { position: relative; height: 100%; min-height: 0; }
+    #main-queue-scroll { position: relative; box-sizing: border-box; padding: 0 var(--timeline-gutter); overflow-anchor: none; touch-action: pan-y pinch-zoom; }
+    #main-queue-scroll:focus-visible { outline: 1px solid rgba(255,255,255,.3); outline-offset: -2px; border-radius: 14px; }
+    #history-song-queue { padding-bottom: 0; }
+    #history-song-queue:empty { display: none; }
+    #history-status:empty { display: none; }
+    #history-song-queue .queue-info-controls { display: inline-flex !important; }
+    #history-song-queue > li:last-child { margin-bottom: 8px; }
+    #current-song-card { position: relative; z-index: 4; margin-top: 0; margin-bottom: 8px; }
+    #main-queue-scroll.has-upcoming-overflow #current-song-card { position: sticky; top: 0; }
+    #timeline-current-anchor { height: 0; pointer-events: none; }
+    .furatic-queue-middle > #auto-drawer { top: var(--timeline-playing-bottom, 0px); left: var(--timeline-gutter); right: var(--timeline-gutter); }
+    .furatic-queue-middle:has(> #auto-drawer.is-open) #main-queue-scroll { opacity: 1; }
+    #main-queue-scroll[data-panel-covered="true"] { overflow-y: hidden; }
+    #main-queue-scroll[data-panel-covered="true"] #song-queue,
+    #main-queue-scroll[data-panel-covered="true"][data-panel-current-visible="false"] #history-song-queue { visibility: hidden; }
+    .furatic-timeline-recenter { position: absolute; bottom: 12px; right: calc(12px + var(--timeline-gutter)); z-index: 7;
+      display: flex; align-items: center; gap: 8px; min-height: 42px; padding: 10px 14px;
+      border: 1px solid rgba(255,255,255,.2); border-radius: 999px; color: var(--furatic-text);
+      background: rgba(20,24,38,.82); -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px);
+      font: inherit; font-size: .8rem; cursor: pointer; opacity: 0; transform: translateY(12px) scale(.96); pointer-events: none;
+      transition: opacity 260ms ease, transform 420ms cubic-bezier(.22,1,.36,1), background 180ms ease; }
+    .furatic-timeline-recenter.is-visible { opacity: 1; transform: translateY(0) scale(1); pointer-events: auto; }
+    .furatic-timeline-recenter:hover { background: rgba(40,48,66,.94); }
+    .furatic-timeline-recenter:focus-visible { outline: 2px solid var(--furatic-text); outline-offset: 3px; }
+    @media (max-width: 660px) { html.furatic-framed .furatic-embed-shell { --timeline-gutter: 16px; } }
+    @media (max-width: 460px) { html.furatic-framed .furatic-embed-shell { --timeline-gutter: 14px; } }
+    @media (prefers-reduced-motion: reduce) { .furatic-timeline-recenter { transition: none; } }
 </style>
 
 <div class="furatic-embed-shell">
     <ul class="list-group">
         <li class="list-group-item" id="music-input-card">
-            <button id="queue-history-button" type="button" class="furatic-icon-button" aria-label="Recently played songs" aria-controls="history-drawer" aria-expanded="false"><i class="fas fa-history" aria-hidden="true"></i></button>
             <span class="clearable">
                 <input class="form-control" id="music-input" placeholder="Search for music or enter a YouTube link..." autofocus autocomplete="off">
                 <i class="fas fa-times" id="clearbutton"></i>
@@ -1662,6 +1690,12 @@
         </li>
     </ul>
 
+    <div class="furatic-queue-middle">
+        <div id="queue-timeline">
+            <div id="main-queue-scroll" class="furatic-list-scroll" tabindex="0" role="region" aria-label="Song history, currently playing, and upcoming songs">
+                <p id="history-status" class="furatic-drawer-note" role="status"></p>
+                <ul class="list-group" id="history-song-queue" aria-label="Previously played songs, oldest first"></ul>
+                <div id="timeline-current-anchor" aria-hidden="true"></div>
     <ul class="list-group" id="current-song-card">
         <li class="list-group-item empty" id="current-song">
             <div class="current-song-top-row">
@@ -1699,13 +1733,11 @@
             </div>
         </li>
     </ul>
-
-    <div class="furatic-queue-middle">
-        <div id="main-queue-scroll" class="furatic-list-scroll"><ul class="list-group" id="song-queue"></ul></div>
-        <section id="history-drawer" class="furatic-queue-drawer" aria-label="Recently played" aria-hidden="true" hidden inert>
-            <div class="furatic-drawer-heading"><div><strong>Recently played</strong><small>Last 12 hours · newest first</small></div><button id="history-close" type="button" class="furatic-icon-button" aria-label="Close recently played"><i class="fas fa-times" aria-hidden="true"></i></button></div>
-            <div class="furatic-list-scroll"><ul class="list-group" id="history-song-queue"></ul><p id="history-status" class="furatic-drawer-note" role="status"></p><button id="history-more" type="button" class="furatic-list-more" hidden>Show earlier songs</button></div>
-        </section>
+                <ul class="list-group" id="song-queue"></ul>
+                <div id="timeline-tail" aria-hidden="true"></div>
+            </div>
+            <button id="timeline-recenter" class="furatic-timeline-recenter" type="button" aria-label="Return to currently playing song" aria-controls="main-queue-scroll" aria-hidden="true" inert><i class="fas fa-arrow-down" aria-hidden="true"></i><span>Now playing</span></button>
+        </div>
     </div>
     <section id="auto-queue-dock" class="list-group-item" aria-label="pre-queue preview">
         <button id="auto-queue-toggle" type="button" aria-expanded="false" aria-controls="auto-drawer"><strong><span class="auto-queue-label"><span>pre-queue</span></span> <span id="auto-queue-count">0</span></strong><i class="fas fa-chevron-up" aria-hidden="true"></i></button>
