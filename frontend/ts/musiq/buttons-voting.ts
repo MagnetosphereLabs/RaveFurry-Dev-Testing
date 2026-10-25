@@ -72,7 +72,7 @@ export function onReady() {
   function activationSignature(buttonElement) {
     const button = $(buttonElement).closest('.vote-up, .vote-down');
     const keyedElement = button.closest('[data-queue-key]');
-    const key = keyedElement.attr('data-queue-key') || '';
+    const key = keyedElement.attr('data-queue-key') || button.closest('[data-history-id]').attr('data-history-id') || '';
     const id = button.attr('id') || '';
     const direction = button.hasClass('vote-up') ? 'up' : 'down';
 
@@ -114,6 +114,8 @@ export function onReady() {
   }
 
   function resolveVoteKey(button) {
+    const historyRow = button.closest('[data-history-id]');
+    if (historyRow.length) return Number(historyRow.attr('data-history-id'));
     if (button.closest('#current-song-card').length > 0) {
       if (state == null || state.currentSong == null) {
         return -1;
@@ -132,6 +134,7 @@ export function onReady() {
     const previous = getVoteState(occurrence);
     if (button.attr('data-furatic-own-vote-blocked') === 'true' ||
         row.attr('data-priority-tier') === 'extra' ||
+        row.attr('data-history-pending') === 'true' || previous?.eligible === false ||
         button.attr('data-vote-pending') === 'true') return false;
     if (!previous) {
       document.dispatchEvent(new CustomEvent('furatic:refresh-personal-votes'));
@@ -155,6 +158,7 @@ export function onReady() {
     form.set('choice', String(desired));
     form.set('revision', String(previous.voteRevision));
     form.set('mutation', mutation);
+    if (row.is('[data-history-id]')) form.set('history', '1');
     form.set('csrfmiddlewaretoken', CSRF_TOKEN);
     const abort = new AbortController();
     const timeout = window.setTimeout(() => abort.abort(), 9000);
@@ -182,6 +186,7 @@ export function onReady() {
       document.dispatchEvent(new CustomEvent('furatic:refresh-personal-votes'));
       getState();
       paintVotes();
+      if (row.is('[data-history-id]')) document.dispatchEvent(new CustomEvent('furatic:history-refresh'));
     }
     return true;
   }
