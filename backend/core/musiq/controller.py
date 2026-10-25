@@ -420,6 +420,8 @@ def own_song_state(request: WSGIRequest) -> HttpResponse:
     active_songs = list(musiq.ordered_queue_queryset())
     if current_song:
         active_songs.append(current_song)
+    from core import played_history
+    active_songs.extend(played_history.recent())
     response = JsonResponse({
         "songs": songs,
         "currentSongQueueKey": current_song_queue_key,
@@ -466,6 +468,9 @@ def vote(request: WSGIRequest) -> HttpResponse:
         occurrence = uuid.UUID(request.POST["occurrence"]) if request.POST.get("occurrence") else None
         revision = int(request.POST["revision"]) if request.POST.get("revision") is not None else None
         mutation = request.POST.get("mutation", "")
+        history = request.POST.get("history") == "1"
+        if history and (desired is None or occurrence is None):
+            raise ValueError()
         if desired is not None and (desired not in (-1, 0, 1) or occurrence is None):
             raise ValueError()
         if amount is not None and (amount < -2 or amount > 2 or amount == 0):
@@ -478,7 +483,7 @@ def vote(request: WSGIRequest) -> HttpResponse:
         return HttpResponseBadRequest("Invalid vote request.")
     try:
         response, removed, should_skip = voting.apply_vote(
-            request, key, desired, amount, occurrence, revision, mutation,
+            request, key, desired, amount, occurrence, revision, mutation, history=history,
         )
     except voting.VoteRejected as error:
         return JsonResponse({"message": str(error), **error.state}, status=error.status)
@@ -492,33 +497,25 @@ def vote(request: WSGIRequest) -> HttpResponse:
     if "amount" in response:
         audit_log.append(
             "user_vote", request=request,
-            target="current-song" if models.CurrentSong.objects.filter(queue_key=key).exists() else "queue",
+            target="history" if history else "current-song" if models.CurrentSong.objects.filter(queue_key=key).exists() else "queue",
             song_key=key, metadata={"amount": response["amount"]},
         )
-    musiq.update_state()
+    if not history:
+        musiq.update_state()
     return JsonResponse(response)
 
 
 def played_history(request: WSGIRequest) -> HttpResponse:
-    """Return one bounded page of public song metadata from the last 12 hours."""
-    from django.db.models import Q
+    """Return the bounded event timeline and authoritative personal vote states."""
+    from core import played_history as history_store, voting
 
-    rows = models.PlaybackHistory.objects.filter(ended_at__gte=timezone.now() - datetime.timedelta(hours=12))
-    cursor = request.GET.get("before", "")
-    if cursor:
-        try:
-            anchor = models.PlaybackHistory.objects.get(pk=int(cursor))
-            rows = rows.filter(Q(ended_at__lt=anchor.ended_at) | Q(ended_at=anchor.ended_at, id__lt=anchor.pk))
-        except (ValueError, models.PlaybackHistory.DoesNotExist):
-            return HttpResponseBadRequest("Invalid history page.")
-    page = list(rows[:21])
-    more = len(page) > 20
-    page = page[:20]
+    page = list(history_store.recent())
     response = JsonResponse({"songs": [{
         "id": row.id, "artist": row.artist, "title": row.title,
+        "occurrenceId": str(row.occurrence_id), "votes": row.votes,
         "externalUrl": row.external_url, "artworkUrl": row.artwork_url,
         "duration": row.duration, "endedAt": row.ended_at.isoformat(),
         "outcome": row.outcome,
-    } for row in page], "nextCursor": str(page[-1].id) if page and more else None})
-    response["Cache-Control"] = "no-store"
+    } for row in page], "nextCursor": None, "myVotes": voting.personal_state(request, page)})
+    response["Cache-Control"] = "private, no-store"
     return response
