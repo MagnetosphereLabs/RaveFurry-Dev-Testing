@@ -184,39 +184,20 @@ def landing(request: WSGIRequest) -> HttpResponse:
 
 
 def _afterhours_top_songs() -> list:
-    """Rank unique songs by their accumulated playback scores in the last 12 hours."""
-    now = timezone.now()
-    cutoff = now - datetime.timedelta(hours=12)
-    fields = ("occurrence_id", "external_url", "artist", "title", "artwork_url", "votes")
-    history = list(models.PlaybackHistory.objects.filter(
-        ended_at__gte=cutoff, ended_at__lte=now,
-    ).order_by("-ended_at", "-id").values(*fields))
-    # After-hours pauses the last track instead of retiring it into history.
-    current = models.CurrentSong.objects.filter(
-        playback_started_at__gte=cutoff, playback_started_at__lte=now,
-    ).exclude(occurrence_id__in=[row["occurrence_id"] for row in history]).values(*fields)
-    songs = {}
-    for row in list(current) + history:
-        key = row["external_url"] or (row["artist"], row["title"])
-        if key not in songs:
-            songs[key] = {
-                "title": row["title"] or "Untitled song",
-                "artist": row["artist"] or "Unknown artist",
-                "artworkUrl": row["artwork_url"],
-                "votes": 0,
-            }
-        songs[key]["votes"] += int(row["votes"] or 0)
-    return sorted(songs.values(), key=lambda song: (
-        -song["votes"], song["title"].casefold(), song["artist"].casefold(),
-    ))[:20]
+    """Read the latest actual event, including its persisted final chart."""
+    from core import event_charts
+    return event_charts.public_data()["songs"]
 
 
 def afterhours(_request: WSGIRequest) -> HttpResponse:
     """Renders the FURATIC After Hours page."""
     page_context = _furatic_public_context()
     try:
-        page_context["afterhours_top_songs"] = _afterhours_top_songs()
-    except DatabaseError:
+        from core import event_charts
+        event_data = event_charts.public_data(_request.GET.get("event"))
+        page_context["afterhours_top_songs"] = event_data["songs"]
+        page_context["afterhours_event_data"] = event_data
+    except (DatabaseError, OSError, ValueError, KeyError, TypeError):
         logger.exception("could not read after-hours top songs")
         page_context["afterhours_top_songs_unavailable"] = True
     return _disable_dynamic_page_cache(
@@ -227,8 +208,9 @@ def afterhours(_request: WSGIRequest) -> HttpResponse:
 def afterhours_top_songs(_request: WSGIRequest) -> HttpResponse:
     """Refresh the after-hours chart without reloading the landing page."""
     try:
-        response = JsonResponse({"songs": _afterhours_top_songs()})
-    except DatabaseError:
+        from core import event_charts
+        response = JsonResponse(event_charts.public_data(_request.GET.get("event")))
+    except (DatabaseError, OSError, ValueError, KeyError, TypeError):
         logger.exception("could not refresh after-hours top songs")
         response = JsonResponse({"message": "Top songs are temporarily unavailable."}, status=503)
     return _disable_dynamic_page_cache(response)
@@ -236,16 +218,11 @@ def afterhours_top_songs(_request: WSGIRequest) -> HttpResponse:
 
 def afterhours_history(_request: WSGIRequest) -> HttpResponse:
     """Return the fifty most recent plays, independently of the vote rankings."""
-    now = timezone.now()
     try:
-        rows = models.PlaybackHistory.objects.filter(
-            ended_at__gte=now - datetime.timedelta(hours=12), ended_at__lte=now,
-        ).order_by("-ended_at", "-id")[:50]
-        response = JsonResponse({"songs": [{
-            "id": row.id, "artist": row.artist, "title": row.title,
-            "artworkUrl": row.artwork_url, "endedAt": row.ended_at.isoformat(),
-        } for row in rows]})
-    except DatabaseError:
+        from core import event_charts
+        data = event_charts.public_data(_request.GET.get("event"))
+        response = JsonResponse({"songs": data["history"], "eventId": data["eventId"]})
+    except (DatabaseError, OSError, ValueError, KeyError, TypeError):
         logger.exception("could not read after-hours playback history")
         response = JsonResponse({"message": "Recently played songs are temporarily unavailable."}, status=503)
     return _disable_dynamic_page_cache(response)
