@@ -330,6 +330,8 @@ class PlaybackHistory(models.Model):
     duration = models.FloatField()
     votes = models.IntegerField(default=0)
     outcome = models.CharField(max_length=20, default="completed")
+    requester_ip = models.CharField(max_length=45, blank=True, default="")
+    requester_token = models.CharField(max_length=64, blank=True, default="")
 
     class Meta:
         ordering = ["-ended_at", "-id"]
