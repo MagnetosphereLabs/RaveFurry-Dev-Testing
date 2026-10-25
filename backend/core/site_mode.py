@@ -1,4 +1,5 @@
 from redis.exceptions import RedisError
+from django.db import transaction
 
 from core import redis
 from core.settings import storage
@@ -30,6 +31,10 @@ def set_mode(mode: str) -> str:
     normalized = _normalize_mode(mode)
     storage.put("site_mode", normalized)
     redis.put("site_mode", normalized)
+    # Capture after the surrounding queue transaction commits. The optional
+    # archive handles its own failures and never changes playback or mode flow.
+    from core import event_charts
+    transaction.on_commit(lambda: event_charts.sync_mode(get_mode()))
     return normalized
 
 
