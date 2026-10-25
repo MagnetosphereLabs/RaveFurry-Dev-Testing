@@ -1,6 +1,7 @@
 import {registerSpecificState} from '../base';
 import {getStoredVote, paintVotes} from './vote-state';
-import {initPanels, updateAutoPreview, refreshOpenHistory} from './panels';
+import {initPanels, updateAutoPreview} from './panels';
+import {HistoryTimeline} from './timeline';
 import {showPlayButton, showPauseButton, reconcileDownloadNotifications} from './buttons';
 import {syncAudioStream} from './audio';
 import {cleanDisplayNames} from './display-name';
@@ -9,8 +10,17 @@ export let state = null;
 const rowAnimations = new Map<HTMLElement, Animation>();
 let lastStateReceivedAt = 0;
 let promotingOccurrence: string | null = null;
-let currentPromotion: Animation | null = null;
-let restorePromotionLayer: (() => void) | null = null;
+type MorphOwner = {current: Animation | null, restore: (() => void) | null};
+const promotionMotion: MorphOwner = {current: null, restore: null};
+const retirementMotion: MorphOwner = {current: null, restore: null};
+let timeline: HistoryTimeline;
+let retiringOccurrence: string | null = null;
+
+/** Release finished effects as well as their detached snapshot targets. */
+function releaseAnimation(animation: Animation) {
+  animation.cancel();
+  animation.effect = null;
+}
 
 /** Freeze a visual without retaining IDs or live controls. */
 function promotionSnapshot(element: HTMLElement): HTMLElement {
@@ -30,23 +40,23 @@ function promotionSnapshot(element: HTMLElement): HTMLElement {
   return copy;
 }
 
-function capturePromotion(newSong, oldState) {
+function capturePromotion(newSong, oldState, retiring = false) {
   if (!oldState || oldState.currentSong?.occurrenceId === newSong?.occurrenceId) return null;
-  if (currentPromotion) {
-    currentPromotion.cancel(); currentPromotion = null;
-    restorePromotionLayer?.(); restorePromotionLayer = null;
+  if (promotionMotion.current) {
+    releaseAnimation(promotionMotion.current); promotionMotion.current = null;
+    promotionMotion.restore?.(); promotionMotion.restore = null;
   }
   if (!newSong || window.matchMedia('(prefers-reduced-motion: reduce)').matches) return null;
   const row = Array.from(document.querySelectorAll<HTMLElement>('#song-queue > li'))
       .find(node => node.dataset.occurrenceId === String(newSong.occurrenceId));
   const card = document.getElementById('current-song');
   const scroll = document.getElementById('main-queue-scroll');
-  if (!row || !card || typeof card.animate !== 'function' || scroll?.hasAttribute('inert')) return null;
+  if (!row || !card || typeof card.animate !== 'function' || scroll?.hasAttribute('inert') || scroll?.dataset.panelCovered === 'true') return null;
   const from = row.getBoundingClientRect();
   const viewport = (scroll || row.parentElement).getBoundingClientRect();
   if (!from.height || from.bottom <= viewport.top || from.top >= viewport.bottom) return null;
   const oldRect = card.getBoundingClientRect();
-  const ghost = oldState.currentSong ? promotionSnapshot(card) : null;
+  const ghost = oldState.currentSong && !retiring ? promotionSnapshot(card) : null;
   const style = window.getComputedStyle(row);
   const surface = {backgroundColor: style.backgroundColor, borderColor: style.borderColor, borderRadius: style.borderRadius};
   // Measure shared elements before their queue row is removed. Independent
@@ -66,7 +76,66 @@ function capturePromotion(newSong, oldState) {
   return {from, surface, parts, ghost, oldRect, card, occurrence: String(newSong.occurrenceId)};
 }
 
-function finishPromotion(promotion: ReturnType<typeof capturePromotion>) {
+
+function captureRetirement(oldState, newSong) {
+  const song = oldState?.currentSong;
+  if (!song?.occurrenceId || !song.playbackStartedAt || song.occurrenceId === newSong?.occurrenceId ||
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches) return null;
+  if (retirementMotion.current) {
+    releaseAnimation(retirementMotion.current); retirementMotion.current = null;
+    retirementMotion.restore?.(); retirementMotion.restore = null;
+  }
+  const card = document.getElementById('current-song');
+  const scroll = document.getElementById('main-queue-scroll');
+  if (!card || !scroll || typeof card.animate !== 'function' || scroll.hasAttribute('inert')) return null;
+  const from = card.getBoundingClientRect();
+  const viewport = scroll.getBoundingClientRect();
+  if (!from.height || from.bottom <= viewport.top || from.top >= viewport.bottom) return null;
+  const style = getComputedStyle(card);
+  const parts = [
+    ['#current-song-artwork', '.queue-artwork'], ['#current-song-title', '.queue-title'],
+    ['#current-song-vote-up', '.vote-up'], ['#current-song-votes', '.queue-vote-count'],
+    ['#current-song-vote-down', '.vote-down'], ['#current-song-time-total', '.queue-info-time'],
+  ].map(([source, target]) => {
+    const node = card.querySelector<HTMLElement>(source);
+    return node && node.getBoundingClientRect().width ?
+      {visual: promotionSnapshot(node), from: node.getBoundingClientRect(), target} : null;
+  }).filter(Boolean);
+  return {from, oldRect: from, ghost: promotionSnapshot(card), parts,
+    surface: {backgroundColor: style.backgroundColor, borderColor: style.borderColor, borderRadius: style.borderRadius},
+    occurrence: String(song.occurrenceId)};
+}
+
+/** When the next queue row is offscreen, refresh the pinned card in place. */
+function finishPinnedChange(retirement: ReturnType<typeof captureRetirement>) {
+  const card = document.getElementById('current-song');
+  if (!retirement || !card || typeof card.animate !== 'function') return;
+  const ghost = retirement.ghost;
+  const scale = document.documentElement.classList.contains('furatic-mobile-compact') ? .93 : 1;
+  Object.assign(ghost.style, {position: 'fixed', left: retirement.from.left + 'px', top: retirement.from.top + 'px',
+    width: retirement.from.width / scale + 'px', height: retirement.from.height / scale + 'px', margin: '0',
+    boxSizing: 'border-box', transform: `scale(${scale})`, transformOrigin: 'top left', zIndex: '20', pointerEvents: 'none'});
+  document.body.appendChild(ghost);
+  const outgoing = ghost.animate([{opacity: 1}, {opacity: 0}], {duration: 320, easing: 'ease-out'});
+  const incoming = card.animate([{opacity: .15, transform: 'translateY(5px)'}, {opacity: 1, transform: 'translateY(0)'}],
+      {duration: 520, easing: 'cubic-bezier(.22,1,.36,1)'});
+  const cleanup = () => {
+    releaseAnimation(outgoing); releaseAnimation(incoming); ghost.remove();
+    window.removeEventListener('resize', cleanup);
+    for (const event of ['wheel', 'touchstart', 'touchmove', 'pointerdown']) {
+      document.getElementById('main-queue-scroll')?.removeEventListener(event, cleanup);
+    }
+    if (promotionMotion.current === incoming) { promotionMotion.current = null; promotionMotion.restore = null; }
+  };
+  promotionMotion.current = incoming; promotionMotion.restore = cleanup;
+  window.addEventListener('resize', cleanup, {once: true});
+  for (const event of ['wheel', 'touchstart', 'touchmove', 'pointerdown']) {
+    document.getElementById('main-queue-scroll')?.addEventListener(event, cleanup, {once: true, passive: true});
+  }
+  Promise.all([outgoing.finished.catch(() => undefined), incoming.finished.catch(() => undefined)]).then(cleanup);
+}
+
+function finishPromotion(promotion: ReturnType<typeof capturePromotion>, owner = promotionMotion) {
   if (!promotion) return;
   const {from, surface, parts, ghost, oldRect, card} = promotion;
   const to = card.getBoundingClientRect();
@@ -142,22 +211,28 @@ function finishPromotion(promotion: ReturnType<typeof capturePromotion>) {
   const previousOpacity = card.style.opacity;
   const previousPriority = card.style.getPropertyPriority('opacity');
   card.style.setProperty('opacity', '0', 'important');
-  restorePromotionLayer = () => {
+  owner.restore = () => {
     card.style.setProperty('opacity', previousOpacity, previousPriority);
     window.removeEventListener('resize', cancelPromotion);
-    animations.forEach(animation => animation.cancel());
+    for (const event of ['wheel', 'touchstart', 'touchmove', 'pointerdown']) {
+      document.getElementById('main-queue-scroll')?.removeEventListener(event, cancelPromotion);
+    }
+    animations.forEach(releaseAnimation);
     visuals.forEach(visual => visual.remove());
   };
-  currentPromotion = motion;
+  owner.current = motion;
   const cancelPromotion = () => {
-    if (currentPromotion === motion) {
-      currentPromotion = null; restorePromotionLayer?.(); restorePromotionLayer = null;
+    if (owner.current === motion) {
+      owner.current = null; owner.restore?.(); owner.restore = null;
     }
   };
   window.addEventListener('resize', cancelPromotion, {once: true});
+  for (const event of ['wheel', 'touchstart', 'touchmove', 'pointerdown']) {
+    document.getElementById('main-queue-scroll')?.addEventListener(event, cancelPromotion, {once: true, passive: true});
+  }
   Promise.all(animations.map(animation => animation.finished.catch(() => undefined))).then(() => {
-    if (currentPromotion === motion) {
-      currentPromotion = null; restorePromotionLayer?.(); restorePromotionLayer = null;
+    if (owner.current === motion) {
+      owner.current = null; owner.restore?.(); owner.restore = null;
     }
   });
 }
@@ -255,7 +330,11 @@ export function updateState(newState) {
   }
 
   const currentSong = newState.musiq.currentSong;
-  const promotion = capturePromotion(currentSong, oldState);
+  const anchor = timeline?.capture();
+  const retirement = captureRetirement(oldState, currentSong);
+  const promotion = capturePromotion(currentSong, oldState, Boolean(retirement));
+  retiringOccurrence = retirement?.occurrence || null;
+  if (oldState?.currentSong?.occurrenceId !== currentSong?.occurrenceId) timeline?.retire(oldState?.currentSong);
   promotingOccurrence = promotion?.occurrence || null;
   if (currentSong == null) {
     state = newState.musiq;
@@ -456,9 +535,22 @@ export function updateState(newState) {
 
   // don't start a new animation when an old one is still in progress
   // the running animation will end in the (then) current state
-  applyQueueChange(oldState, state);
+  const currentChanged = oldState?.currentSong?.occurrenceId !== state.currentSong?.occurrenceId;
+  applyQueueChange(oldState, state, () => timeline?.restore(anchor, currentChanged));
   promotingOccurrence = null;
   finishPromotion(promotion);
+  if (retirement) {
+    const row = Array.from(document.querySelectorAll<HTMLElement>('#history-song-queue > li'))
+        .find(node => node.dataset.occurrenceId === retirement.occurrence);
+    const viewport = document.getElementById('main-queue-scroll').getBoundingClientRect();
+    const destination = row?.getBoundingClientRect();
+    if (destination && destination.bottom > viewport.top && destination.top < viewport.bottom) {
+      finishPromotion({...retirement, card: row}, retirementMotion);
+    } else if (!promotion && currentSong) {
+      finishPinnedChange(retirement);
+    }
+  }
+  retiringOccurrence = null;
   syncClosingBanner(state);
   reconcileDownloadNotifications();
 
@@ -467,7 +559,7 @@ export function updateState(newState) {
       oldState.currentSong?.occurrenceId !== state.currentSong?.occurrenceId) {
     document.dispatchEvent(new CustomEvent('furatic:refresh-personal-votes'));
   }
-  if (oldState && oldState.currentSong?.occurrenceId !== state.currentSong?.occurrenceId) refreshOpenHistory();
+  if (oldState && oldState.currentSong?.occurrenceId !== state.currentSong?.occurrenceId) timeline?.refresh();
   syncAudioStream();
 }
 
@@ -505,7 +597,7 @@ function syncClosingBanner(newState) {
 /** Create an empty queue entry.
  * @return {Object} the created queue item
  */
-function createQueueItem() {
+function createQueueItem(history = false) {
   const li = $('<li/>')
       .addClass('list-group-item')
       .attr('data-next-up-locked', 'false');
@@ -539,6 +631,8 @@ function createQueueItem() {
   $('<img/>')
       .addClass('queue-artwork')
       .attr('alt', '')
+      .attr('loading', history ? 'lazy' : 'eager')
+      .attr('decoding', history ? 'async' : null)
       .hide()
       .appendTo(entryDiv);
 
@@ -626,7 +720,8 @@ function updateInformation(entry, song) {
   index.text(song.index);
 
   const voteCount = entry.find('.queue-vote-count');
-  if (voteCount.length) {
+  if (voteCount.length && !(entry.hasClass('furatic-history-song') &&
+      entry.find('.vote-up').attr('data-vote-pending') === 'true')) {
     voteCount.text(String(song.votes));
   }
 
@@ -740,13 +835,13 @@ function animateExit(list: HTMLElement, row: HTMLElement, enabled: boolean) {
     const animation = ghost.animate([{opacity:1, transform:'translateY(0) scale(1)', filter:'blur(0)'},
       {opacity:0, transform:'translateY(-6px) scale(.985)', filter:'blur(8px)'}],
       {duration:300, easing:'cubic-bezier(.22,1,.36,1)', fill:'both'});
-    animation.finished.catch(() => undefined).then(() => { animation.cancel(); ghost.remove(); });
+    animation.finished.catch(() => undefined).then(() => { releaseAnimation(animation); ghost.remove(); });
   }
   row.remove();
 }
 
 /** Keyed FLIP: measure real row positions; retain nodes, focus and existing entry effects. */
-export function reconcileList(selector: string, songs: any[], animate = true, history = false) {
+export function reconcileList(selector: string, songs: any[], animate = true, history = false, settle?: () => void) {
   const list = document.querySelector<HTMLElement>(selector);
   if (!list || list.classList.contains('ui-sortable-active')) return;
   const existing = new Map<string, HTMLElement>();
@@ -757,7 +852,7 @@ export function reconcileList(selector: string, songs: any[], animate = true, hi
     existing.set(key, row);
     before.set(key, row.getBoundingClientRect());
     const running = rowAnimations.get(row);
-    if (running) { running.cancel(); rowAnimations.delete(row); }
+    if (running) { releaseAnimation(running); rowAnimations.delete(row); }
   });
   const keep = new Set<string>();
   const targets: HTMLElement[] = [];
@@ -766,46 +861,51 @@ export function reconcileList(selector: string, songs: any[], animate = true, hi
     keep.add(key);
     let row = existing.get(key);
     const added = !row;
-    if (!row) row = createQueueItem()[0];
+    if (!row) row = createQueueItem(history)[0];
     updateInformation($(row), song);
     if (history) {
       row.removeAttribute('data-queue-key');
       row.removeAttribute('data-priority-tier');
-      row.querySelectorAll('.queue-info-controls, .download-icon, .vote-indicators').forEach(node => node.remove());
+      row.dataset.historyId = String(song.id || 0);
+      row.dataset.historyPending = String(Boolean(song.pendingHistory));
+      row.classList.add('furatic-history-song');
+      row.querySelectorAll('.queue-admin-controls, .download-icon, .vote-indicators').forEach(node => node.remove());
       const duration = row.querySelector('.queue-info-time');
       duration.setAttribute('title', 'Played ' + new Date(song.endedAt).toLocaleTimeString());
     }
     // appendChild on an already ordered node would also disturb focus every poll.
     const index = targets.length;
     if (list.children[index] !== row) list.insertBefore(row, list.children[index] || null);
-    if (added && animate && !window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    if (added && animate && key !== retiringOccurrence && !window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
       row.classList.add('furatic-queue-item-enter');
       window.setTimeout(() => row.classList.remove('furatic-queue-item-enter'), 820);
     }
     targets.push(row);
   }
   existing.forEach((row, key) => { if (!keep.has(key)) animateExit(list, row, animate && key !== promotingOccurrence); });
+  settle?.();
   if (!animate || window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
   targets.forEach(row => {
     const previous = before.get(row.dataset.occurrenceId);
     if (!previous || typeof row.animate !== 'function') return;
     const after = row.getBoundingClientRect();
-    const delta = previous.top - after.top;
+    const scale = list.getBoundingClientRect().width / list.offsetWidth || 1;
+    const delta = (previous.top - after.top) / scale;
     if (Math.abs(delta) < 1 || !after.height) return;
     const animation = row.animate([{transform: `translateY(${delta}px)`}, {transform: 'translateY(0)'}], {
       duration: 500, easing: 'cubic-bezier(0.22, 1, 0.36, 1)',
     });
     rowAnimations.set(row, animation);
     animation.finished.catch(() => undefined).then(() => {
-      if (rowAnimations.get(row) === animation) { rowAnimations.delete(row); animation.cancel(); }
+      if (rowAnimations.get(row) === animation) { rowAnimations.delete(row); releaseAnimation(animation); }
     });
   });
 }
 
-function applyQueueChange(oldState, newState) {
+function applyQueueChange(oldState, newState, settle?: () => void) {
   const split = Boolean(document.getElementById('auto-song-queue'));
   const songs = newState.songQueue || [];
-  reconcileList('#song-queue', split ? songs.filter(s => s.priorityTier !== 'extra') : songs, oldState !== null);
+  reconcileList('#song-queue', split ? songs.filter(s => s.priorityTier !== 'extra') : songs, oldState !== null, false, settle);
   if (split) {
     const extras = songs.filter(s => s.priorityTier === 'extra');
     reconcileList('#auto-song-queue', extras, oldState !== null);
@@ -814,13 +914,29 @@ function applyQueueChange(oldState, newState) {
   $('#song-queue > li[data-next-up-locked="true"]').addClass('ui-state-disabled');
 }
 
+export function initHistoryTimeline() {
+  if (timeline || !document.getElementById('history-song-queue')) return;
+  timeline = new HistoryTimeline((songs, animate, settle) => reconcileList('#history-song-queue', songs.map(song => ({
+    ...song, internalUrl: 'history', requestedBy: null, upvotes: [], downvotes: [],
+    durationFormatted: formatSeconds(song.duration),
+  })), animate, true, settle));
+  window.addEventListener('pagehide', () => {
+    for (const owner of [promotionMotion, retirementMotion]) {
+      if (owner.current) releaseAnimation(owner.current);
+      owner.current = null;
+      owner.restore?.(); owner.restore = null;
+    }
+  });
+}
+
 $(document).ready(() => {
   if (!["/musiq/", "/p/"].includes(window.location.pathname)) {
     return;
   }
 
   registerSpecificState(updateState);
-  initPanels(songs => reconcileList('#history-song-queue', songs.map(song => ({...song, occurrenceId: 'history-' + song.id, durationFormatted: formatSeconds(song.duration)})), false, true));
+  initPanels();
+  initHistoryTimeline();
 
   window.setInterval(function() {
     updateCurrentSongTimeLabels();
