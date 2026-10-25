@@ -13,7 +13,7 @@ canvas{display:block;width:100%;height:100%}
 /* OBS broadcast overlay. The shared unit doubles the entire card, including
    spacing, artwork and typography. The WebGL scene remains independent. */
 #vote-notice{
-  --u:min(2vw,3.55556vh);
+  --u:min(1.7vw,3.022226vh);
   position:fixed;right:calc(var(--u)*.6);top:calc(var(--u)*.6);z-index:2;
   width:calc(var(--u)*27);padding:calc(var(--u)*.75);
   border:1px solid rgba(255,255,255,.26);border-radius:calc(var(--u)*.9);
@@ -43,7 +43,6 @@ canvas{display:block;width:100%;height:100%}
 #vote-notice[data-rank="3"] #vote-notice-badge{--metal-light:#f4d6c1;--metal:#dda780;--metal-dark:#946344;--medal-ink:#392418}
 #vote-notice-badge svg{display:block;width:100%;height:100%;overflow:visible}
 .vote-notice-ribbon{fill:var(--metal-dark)}
-.vote-notice-laurel{fill:none;stroke:var(--metal);stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
 .vote-notice-crown{display:none;fill:var(--metal);stroke:var(--metal-light);stroke-width:1.2;stroke-linejoin:round}
 #vote-notice[data-rank="1"] .vote-notice-crown{display:block}
 .vote-notice-ordinal{fill:var(--medal-ink);font:800 23px system-ui,sans-serif;letter-spacing:-1px}
@@ -83,7 +82,6 @@ canvas{display:block;width:100%;height:100%}
           </linearGradient>
         </defs>
         <path class="vote-notice-ribbon" d="M29 78 23 119 40 111 51 124 56 84 61 124 73 111 89 119 83 78Z"/>
-        <path class="vote-notice-laurel" d="M31 89C10 83 7 58 15 41M18 49 10 45M16 58 7 54M17 67 8 65M22 77 12 76M28 84 19 86M81 89C102 83 105 58 97 41M94 49 102 45M96 58 105 54M95 67 104 65M90 77 100 76M84 84 93 86"/>
         <circle cx="56" cy="56" r="36" fill="url(#vote-medal-metal)"/>
         <circle cx="56" cy="56" r="30" fill="none" stroke="var(--metal-light)" stroke-opacity=".8"/>
         <circle cx="56" cy="56" r="27" fill="none" stroke="var(--metal-dark)" stroke-opacity=".6"/>
