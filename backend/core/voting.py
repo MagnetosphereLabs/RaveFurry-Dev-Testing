@@ -60,7 +60,8 @@ def _song_state(song):
     key = getattr(song, "queue_key", song.pk)
     state, _ = models.SongVoteState.objects.get_or_create(
         occurrence_id=song.occurrence_id,
-        defaults={"engagement": lambda: _engagement_from_redis(key)},
+        defaults={"engagement": (dict if isinstance(song, models.PlaybackHistory)
+                                 else lambda: _engagement_from_redis(key))},
     )
     return state
 
@@ -143,10 +144,17 @@ def seed_requester_vote(request, song):
 
 
 @transaction.atomic
-def apply_vote(request, key, desired=None, amount=None, occurrence=None, revision=None, mutation_id=""):
+def apply_vote(request, key, desired=None, amount=None, occurrence=None, revision=None, mutation_id="", history=False):
     queue_lock.acquire()
     who = voter_key(request)
-    song = _active_song(key, occurrence)
+    if history:
+        from core import played_history
+        if occurrence is None or desired is None:
+            raise VoteRejected("Invalid history vote.")
+        eligible_ids = list(played_history.recent().values_list("id", flat=True))
+        song = models.PlaybackHistory.objects.filter(pk=key, occurrence_id=occurrence, id__in=eligible_ids).first()
+    else:
+        song = _active_song(key, occurrence)
     if song is None:
         if occurrence and mutation_id and models.VoteMutation.objects.filter(
             occurrence_id=occurrence, voter_key=who, mutation_id=mutation_id,
@@ -165,7 +173,9 @@ def apply_vote(request, key, desired=None, amount=None, occurrence=None, revisio
     if owns:
         raise VoteRejected("Your song already starts with one vote; you cannot vote on your own song.", 403)
     state = _song_state(song)
-    old, changed = _legacy_choice(ip, key) if storage.get("ip_checking") else (0, None)
+    if history and request.session.session_key and (state.engagement or {}).get("requester") == request.session.session_key:
+        raise VoteRejected("Your song already starts with one vote; you cannot vote on your own song.", 403)
+    old, changed = _legacy_choice(ip, key) if not history and storage.get("ip_checking") else (0, None)
     record, _ = models.SongVote.objects.get_or_create(
         occurrence=state, voter_key=who, defaults={"choice": old, "changed_at": changed},
     )
@@ -201,7 +211,8 @@ def apply_vote(request, key, desired=None, amount=None, occurrence=None, revisio
     record.save()
     if storage.get("color_indication") != storage.Privileges.nobody:
         _remember_engagement(state, request, delta)
-        transaction.on_commit(lambda: cache_engagement(state, key))
+        if not history:
+            transaction.on_commit(lambda: cache_engagement(state, key))
     song.votes += delta
     song.save(update_fields=["votes"])
     if mutation_id:
@@ -212,16 +223,19 @@ def apply_vote(request, key, desired=None, amount=None, occurrence=None, revisio
     removed = None
     should_skip = False
     threshold = -storage.get("downvotes_to_kick")
-    if song.votes <= threshold:
+    if not history and song.votes <= threshold:
         if isinstance(song, models.CurrentSong):
             should_skip = True
         else:
             removed = models.QueuedSong.objects.remove(song.pk, snapshot=False)
     from core import playback_state_backup
-    transaction.on_commit(playback_state_backup.snapshot)
+    if not history:
+        transaction.on_commit(playback_state_backup.snapshot)
     response = _response(song, record)
     response["removed"] = removed is not None
     response["amount"] = delta
+    if history:
+        response["history"] = True
     return response, removed, should_skip
 
 
@@ -230,18 +244,26 @@ def personal_state(request, songs):
     choices = {str(v.occurrence_id): v for v in models.SongVote.objects.filter(
         voter_key=who, occurrence_id__in=[s.occurrence_id for s in songs],
     )}
+    identity = user_manager.client_identity(request)
+    ip = user_manager.normalize_ip(user_manager.get_client_ip(request))
     return [{
         "queueKey": getattr(song, "queue_key", song.pk),
         "occurrenceId": str(song.occurrence_id),
         "choice": choices[str(song.occurrence_id)].choice if str(song.occurrence_id) in choices else 0,
         "voteRevision": choices[str(song.occurrence_id)].revision if str(song.occurrence_id) in choices else 0,
-        "eligible": not isinstance(song, models.QueuedSong) or song.priority_tier != "extra",
+        "eligible": (not isinstance(song, models.QueuedSong) or song.priority_tier != "extra") and not (
+            isinstance(song, models.PlaybackHistory) and (
+                song.requester_token and song.requester_token == identity.token_hash or
+                not song.requester_token and ip and song.requester_ip == ip
+            )
+        ),
     } for song in songs]
 
 
 def retire(occurrence):
     models.SongVoteState.objects.filter(pk=occurrence).update(retired_at=timezone.now())
-    models.SongVoteState.objects.filter(retired_at__lt=timezone.now() - datetime.timedelta(hours=24)).delete()
+    kept = list(models.PlaybackHistory.objects.order_by("-ended_at", "-id").values_list("occurrence_id", flat=True)[:50])
+    models.SongVoteState.objects.filter(retired_at__lt=timezone.now() - datetime.timedelta(hours=24)).exclude(pk__in=kept).delete()
 
 
 def import_legacy_votes():
