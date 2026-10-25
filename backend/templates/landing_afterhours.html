@@ -357,6 +357,14 @@
         }
       }
 
+      .event-chart-picker { display: flex; align-items: center; gap: 12px; margin-top: 16px; color: var(--muted-2); font-size: 13px; }
+      .event-chart-picker[hidden] { display: none; }
+      .event-chart-picker select { flex: 1; min-width: 0; min-height: 44px; padding: 10px 36px 10px 14px; border-radius: 13px;
+        border: 1px solid var(--white-line); background: rgba(255,255,255,.055); color: var(--text); font: inherit;
+        color-scheme: dark; cursor: pointer; transition: background 200ms ease, border-color 200ms ease; }
+      .event-chart-picker select:hover { background: rgba(255,255,255,.09); }
+      .event-chart-picker select:focus-visible { outline: 2px solid rgba(var(--cyan),.65); outline-offset: 3px; }
+      .event-chart-picker select:disabled { opacity: 1; cursor: default; }
       .top-songs-header { margin-bottom: 22px; }
       .top-songs-header h2 { margin: 0 0 10px; font-size: clamp(23px, 3.6vw, 32px); line-height: 1.15; letter-spacing: -0.04em; text-wrap: balance; }
       .top-songs-header p { margin: 0; color: var(--muted); font-size: 15px; line-height: 1.65; }
@@ -505,9 +513,9 @@
           <div id="afterhours-history" class="history-reveal" aria-hidden="true" inert>
             <div class="history-reveal-inner">
               <div class="afterhours-history-content">
-                <h2 class="afterhours-history-heading">Recently played</h2>
-                <p class="afterhours-history-copy">Last 12 hours · newest first · up to 50 songs</p>
-                <div class="afterhours-history-scroll" tabindex="0" role="region" aria-label="Recently played songs, newest first">
+                <h2 class="afterhours-history-heading">Played at this event</h2>
+                <p class="afterhours-history-copy">Selected event · newest first · up to 50 songs</p>
+                <div class="afterhours-history-scroll" tabindex="0" role="region" aria-label="Songs played at the selected event, newest first">
                   <ol id="afterhours-history-list" class="afterhours-history-list"></ol>
                 </div>
                 <p id="afterhours-history-status" class="afterhours-history-status" role="status" aria-live="polite"></p>
@@ -517,7 +525,8 @@
         </div>
         <section class="card top-songs-card" aria-labelledby="top-songs-title">
           <div class="top-songs-header">
-            <h2 id="top-songs-title">Top songs from today's Pass the Aux event</h2>
+            <h2 id="top-songs-title">Top songs from Pass the Aux</h2>
+            <label id="event-chart-picker" class="event-chart-picker" hidden><span>Event</span><select id="event-chart-select" aria-label="Choose an event for charts and played songs"></select></label>
           </div>
           <div id="top-songs-viewport" class="top-songs-viewport is-collapsed">
           <ol id="top-songs-list" class="top-songs-list" aria-label="Songs ranked by votes">
@@ -541,6 +550,7 @@
       </section>
     </main>
 
+    {% if afterhours_event_data %}{{ afterhours_event_data|json_script:"afterhours-event-data" }}{% endif %}
     <script>
       (function () {
         const prefersReducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -803,10 +813,20 @@
 
       let topSongsInFlight = false;
       let topSongsSignature = "";
+      let afterhoursHistorySignature = "";
+      let eventsSignature = "";
+      let selectedEvent = "";
       let topSongsExpanded = false;
       let topSongsCollapseTimer = 0;
+      let chartCenterFrame = 0;
+      let requestVersion = 0;
+      let eventAbort = null;
+      const listAnimations = new Map();
       const topSongsViewport = document.getElementById("top-songs-viewport");
       const topSongsToggle = document.getElementById("top-songs-toggle");
+      const historyToggle = document.getElementById("afterhours-history-toggle");
+      const historyRegion = document.getElementById("afterhours-history");
+      const eventSelect = document.getElementById("event-chart-select");
       const reduceListMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
       function syncTopSongsViewport() {
@@ -829,7 +849,34 @@
         topSongsViewport.style.height = (topSongsExpanded ? expanded : collapsed) + "px";
       }
 
+      function stopCenterCharts() {
+        if (chartCenterFrame) window.cancelAnimationFrame(chartCenterFrame);
+        chartCenterFrame = 0;
+        for (const name of ["wheel", "touchstart", "pointerdown", "keydown", "resize"]) window.removeEventListener(name, stopCenterCharts);
+      }
+
+      function centerTopSongs() {
+        stopCenterCharts();
+        const start = window.scrollY;
+        const targetHeight = parseFloat(topSongsViewport.style.height) || topSongsViewport.clientHeight;
+        const target = Math.max(0, start + topSongsViewport.getBoundingClientRect().top + targetHeight / 2 - window.innerHeight / 2);
+        if (reduceListMotion) { window.scrollTo({top: target, behavior: "auto"}); return; }
+        const began = performance.now();
+        for (const name of ["wheel", "touchstart", "pointerdown", "keydown", "resize"]) window.addEventListener(name, stopCenterCharts, {passive: true});
+        const step = function (now) {
+          const progress = Math.min(1, (now - began) / 640);
+          // The page grows during the disclosure: clamping to its old height
+          // would leave the expanded chart below the center of the screen.
+          const maximum = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
+          window.scrollTo({top: Math.min(maximum, start + (target - start) * (1 - Math.pow(1 - progress, 4))), behavior: "auto"});
+          if (progress < 1) chartCenterFrame = window.requestAnimationFrame(step);
+          else stopCenterCharts();
+        };
+        chartCenterFrame = window.requestAnimationFrame(step);
+      }
+
       topSongsToggle.addEventListener("click", function () {
+        stopCenterCharts();
         window.clearTimeout(topSongsCollapseTimer);
         topSongsExpanded = !topSongsExpanded;
         topSongsViewport.classList.remove("is-collapsed");
@@ -840,10 +887,9 @@
           }, reduceListMotion ? 0 : 560);
         }
         syncTopSongsViewport();
+        if (topSongsExpanded) centerTopSongs();
       });
 
-      const historyToggle = document.getElementById("afterhours-history-toggle");
-      const historyRegion = document.getElementById("afterhours-history");
       function syncHistoryHeight() {
         historyRegion.style.height = historyRegion.classList.contains("is-open") ? historyRegion.firstElementChild.scrollHeight + "px" : "0px";
       }
@@ -855,88 +901,121 @@
         historyRegion.toggleAttribute("inert", !open);
         historyToggle.setAttribute("aria-expanded", String(open));
         syncHistoryHeight();
-        if (open) refreshAfterhoursHistory();
+        if (open) refreshTopSongs();
       });
 
+      let listResizeObserver = null;
       if (typeof ResizeObserver === "function") {
-        const listResizeObserver = new ResizeObserver(function () { syncTopSongsViewport(); syncHistoryHeight(); });
+        listResizeObserver = new ResizeObserver(function () { syncTopSongsViewport(); syncHistoryHeight(); });
         listResizeObserver.observe(document.getElementById("top-songs-list"));
         listResizeObserver.observe(historyRegion.firstElementChild);
       }
       window.addEventListener("resize", function () { syncTopSongsViewport(); syncHistoryHeight(); }, {passive: true});
-      syncTopSongsViewport();
 
-      let afterhoursHistoryInFlight = false;
-      let afterhoursHistorySignature = "";
-      async function refreshAfterhoursHistory() {
-        if (afterhoursHistoryInFlight) return;
-        afterhoursHistoryInFlight = true;
-        const abort = new AbortController();
-        const timeout = window.setTimeout(function () { abort.abort(); }, 9000);
-        const list = document.getElementById("afterhours-history-list");
-        const status = document.getElementById("afterhours-history-status");
-        if (!list.children.length) status.textContent = "Loading recently played songs…";
-        syncHistoryHeight();
-        try {
-          const response = await fetch("{% url 'afterhours-history' %}", {cache: "no-store", signal: abort.signal});
-          if (!response.ok) throw new Error("History unavailable");
-          const data = await response.json();
-          if (!Array.isArray(data.songs)) throw new Error("Invalid history");
-          const songs = data.songs.slice(0, 50);
-          const signature = JSON.stringify(songs);
-          if (signature !== afterhoursHistorySignature) {
-            const scroll = list.parentElement.scrollTop;
-            list.innerHTML = songs.length ? songs.map(function (song) {
-              const artwork = /^https?:\/\//i.test(String(song.artworkUrl || "")) ? '<img src="' + escapeSongText(song.artworkUrl) + '" alt="" loading="lazy" decoding="async" onerror="this.remove()">' : "";
-              const ended = new Date(song.endedAt);
-              const time = Number.isFinite(ended.getTime()) ? '<time class="history-song-time" datetime="' + escapeSongText(song.endedAt) + '" title="' + escapeSongText(ended.toLocaleString()) + '">' + escapeSongText(ended.toLocaleTimeString([], {hour: "numeric", minute: "2-digit"})) + '</time>' : "";
-              return '<li class="history-song"><span class="top-song-art" aria-hidden="true">♪' + artwork + '</span><span class="top-song-copy"><strong class="top-song-title">' + escapeSongText(song.title || "Untitled song") + '</strong><span class="top-song-artist">' + escapeSongText(song.artist || "Unknown artist") + '</span></span>' + time + '</li>';
-            }).join("") : '<li class="top-songs-empty">Pass the Aux was not active today, check back after our next event to see the songs everyone played :3</li>';
-            list.parentElement.scrollTop = scroll;
-            afterhoursHistorySignature = signature;
-          }
-          status.textContent = "";
-        } catch (_error) {
-          status.textContent = "Recently played songs will refresh when the connection returns.";
-        } finally {
-          window.clearTimeout(timeout);
-          afterhoursHistoryInFlight = false;
-          syncHistoryHeight();
-        }
+      function replaceEventList(list, markup, animate) {
+        const old = listAnimations.get(list);
+        if (old) { old.cancel(); listAnimations.delete(list); }
+        list.innerHTML = markup;
+        if (!animate || reduceListMotion || typeof list.animate !== "function") return;
+        const animation = list.animate([{opacity: 0.25, transform: "translateY(8px)"}, {opacity: 1, transform: "translateY(0)"}],
+          {duration: 420, easing: "cubic-bezier(.22,1,.36,1)"});
+        listAnimations.set(list, animation);
+        animation.finished.catch(function () {}).then(function () {
+          if (listAnimations.get(list) === animation) listAnimations.delete(list);
+          animation.cancel();
+        });
       }
 
-      async function refreshTopSongs() {
-        if (topSongsInFlight) return;
+      function songArtwork(song) {
+        return /^https?:\/\//i.test(String(song.artworkUrl || "")) ? '<img src="' + escapeSongText(song.artworkUrl) + '" alt="" loading="lazy" decoding="async" onerror="this.remove()">' : "";
+      }
+
+      function renderEventData(data, animate) {
+        if (!Array.isArray(data.songs) || !Array.isArray(data.events) || !Array.isArray(data.history)) throw new Error("Invalid event data");
+        const changedEvent = selectedEvent !== String(data.eventId || "");
+        selectedEvent = String(data.eventId || "");
+        const events = data.events.slice(0, 5);
+        const signature = JSON.stringify(events);
+        if (signature !== eventsSignature) {
+          const labels = events.map(function (event) { return new Date(event.startedAt).toLocaleDateString([], {weekday: "short", month: "short", day: "numeric", year: "numeric"}); });
+          eventSelect.replaceChildren(...events.map(function (event, index) {
+            const option = document.createElement("option");
+            option.value = event.id;
+            option.textContent = labels[index] + (labels.filter(function (label) { return label === labels[index]; }).length > 1 ? " · " + new Date(event.startedAt).toLocaleTimeString([], {hour: "numeric", minute: "2-digit"}) : "") + (index === 0 ? " · latest" : "");
+            return option;
+          }));
+          eventsSignature = signature;
+        }
+        document.getElementById("event-chart-picker").hidden = events.length === 0;
+        eventSelect.disabled = events.length < 2;
+        eventSelect.value = selectedEvent;
+        const songs = data.songs.slice(0, 20);
+        const songSignature = JSON.stringify([selectedEvent, songs]);
+        if (songSignature !== topSongsSignature) {
+          const scroll = changedEvent ? 0 : topSongsViewport.scrollTop;
+          replaceEventList(document.getElementById("top-songs-list"), songs.length ? songs.map(function (song, index) {
+            const votes = Number.isFinite(Number(song.votes)) ? Number(song.votes) : 0;
+            return '<li class="top-song"><span class="top-song-rank" aria-hidden="true">' + (index + 1) + '</span><span class="top-song-art" aria-hidden="true">♪' + songArtwork(song) + '</span><span class="top-song-copy"><strong class="top-song-title">' + escapeSongText(song.title) + '</strong><span class="top-song-artist">' + escapeSongText(song.artist) + '</span></span><span class="top-song-votes">' + votes + ' vote' + (votes === 1 ? '' : 's') + '</span></li>';
+          }).join("") : '<li class="top-songs-empty">Pass the Aux was not active today, check back after our next event to see the songs everyone voted for the most :3</li>', animate && changedEvent);
+          topSongsSignature = songSignature;
+          syncTopSongsViewport();
+          topSongsViewport.scrollTop = scroll;
+        }
+        const history = data.history.slice(0, 50);
+        const historySignature = JSON.stringify([selectedEvent, history]);
+        if (historySignature !== afterhoursHistorySignature) {
+          const list = document.getElementById("afterhours-history-list");
+          const scroll = changedEvent ? 0 : list.parentElement.scrollTop;
+          replaceEventList(list, history.length ? history.map(function (song) {
+            const ended = new Date(song.endedAt);
+            const time = Number.isFinite(ended.getTime()) ? '<time class="history-song-time" datetime="' + escapeSongText(song.endedAt) + '" title="' + escapeSongText(ended.toLocaleString()) + '">' + escapeSongText(ended.toLocaleTimeString([], {hour: "numeric", minute: "2-digit"})) + '</time>' : "";
+            return '<li class="history-song"><span class="top-song-art" aria-hidden="true">♪' + songArtwork(song) + '</span><span class="top-song-copy"><strong class="top-song-title">' + escapeSongText(song.title || "Untitled song") + '</strong><span class="top-song-artist">' + escapeSongText(song.artist || "Unknown artist") + '</span></span>' + time + '</li>';
+          }).join("") : '<li class="top-songs-empty">No songs have finished playing at this event yet.</li>', animate && changedEvent);
+          list.parentElement.scrollTop = scroll;
+          afterhoursHistorySignature = historySignature;
+        }
+        syncHistoryHeight();
+      }
+
+      async function refreshTopSongs(force) {
+        if (topSongsInFlight && !force) return;
+        if (force && eventAbort) eventAbort.abort();
         topSongsInFlight = true;
+        const version = ++requestVersion;
         const abort = new AbortController();
+        eventAbort = abort;
         const timeout = window.setTimeout(function () { abort.abort(); }, 9000);
         const status = document.getElementById("top-songs-status");
         try {
-          const response = await fetch("{% url 'afterhours-top-songs' %}", {cache: "no-store", signal: abort.signal});
+          const url = new URL("{% url 'afterhours-top-songs' %}", window.location.href);
+          if (eventSelect.value || selectedEvent) url.searchParams.set("event", eventSelect.value || selectedEvent);
+          const response = await fetch(url, {cache: "no-store", signal: abort.signal});
           if (!response.ok) throw new Error("Top songs unavailable");
           const data = await response.json();
-          if (!Array.isArray(data.songs)) throw new Error("Invalid top songs");
-          const songs = data.songs.slice(0, 20);
-          const signature = JSON.stringify(songs);
-          if (signature !== topSongsSignature) {
-            const scroll = topSongsViewport.scrollTop;
-            document.getElementById("top-songs-list").innerHTML = songs.length ? songs.map(function (song, index) {
-              const artwork = /^https?:\/\//i.test(String(song.artworkUrl || "")) ? '<img src="' + escapeSongText(song.artworkUrl) + '" alt="" loading="lazy" decoding="async" onerror="this.remove()">' : "";
-              const votes = Number.isFinite(Number(song.votes)) ? Number(song.votes) : 0;
-              return '<li class="top-song"><span class="top-song-rank" aria-hidden="true">' + (index + 1) + '</span><span class="top-song-art" aria-hidden="true">♪' + artwork + '</span><span class="top-song-copy"><strong class="top-song-title">' + escapeSongText(song.title) + '</strong><span class="top-song-artist">' + escapeSongText(song.artist) + '</span></span><span class="top-song-votes">' + votes + ' vote' + (votes === 1 ? '' : 's') + '</span></li>';
-            }).join("") : '<li class="top-songs-empty">Pass the Aux was not active today, check back after our next event to see the songs everyone voted for the most :3</li>';
-            topSongsSignature = signature;
-            syncTopSongsViewport();
-            topSongsViewport.scrollTop = scroll;
-          }
+          if (version !== requestVersion) return;
+          renderEventData(data, Boolean(force));
           status.textContent = "";
-        } catch (_error) {
-          status.textContent = "Top songs will refresh when the connection returns.";
+        } catch (error) {
+          if (version === requestVersion && error.name !== "AbortError") status.textContent = "Top songs will refresh when the connection returns.";
         } finally {
           window.clearTimeout(timeout);
-          topSongsInFlight = false;
+          if (version === requestVersion) { topSongsInFlight = false; eventAbort = null; }
         }
       }
+
+      eventSelect.addEventListener("change", function () { stopCenterCharts(); refreshTopSongs(true); });
+      const initialEventData = document.getElementById("afterhours-event-data");
+      if (initialEventData) {
+        try { renderEventData(JSON.parse(initialEventData.textContent), false); } catch (_error) {}
+      }
+      syncTopSongsViewport();
+      window.addEventListener("pagehide", function () {
+        stopCenterCharts();
+        if (eventAbort) eventAbort.abort();
+        window.clearTimeout(topSongsCollapseTimer);
+        listAnimations.forEach(function (animation) { animation.cancel(); });
+        listAnimations.clear();
+      });
 
       async function pollMode() {
         try {
@@ -955,7 +1034,6 @@
       setInterval(pollMode, 3000);
       refreshTopSongs();
       setInterval(refreshTopSongs, 60000);
-      setInterval(function () { if (historyRegion.classList.contains("is-open")) refreshAfterhoursHistory(); }, 60000);
     </script>
   </body>
 </html>
