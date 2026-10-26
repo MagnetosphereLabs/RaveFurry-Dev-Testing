@@ -37,13 +37,23 @@ class Director:
         self.state = state if isinstance(state, dict) and state.get("version") == 1 else {}
         # A restart/reconnection establishes a baseline; it isn't a new vote.
         self.rebase = True
+        if self.state:
+            # Adopt an older saved ledger without resetting vote records or limits.
+            active = self.state.get("active")
+            self.state.setdefault("displayed", active if active and active.get("kind") in {"rank", "reminder"} else None)
+            if self.state["displayed"]:
+                from core.musiq.display_name import clean_display_names
+                displayed = self.state["displayed"]
+                displayed["artist"], displayed["title"] = clean_display_names(displayed.get("artist"), displayed.get("title"))
+                if displayed.get("kind") in {"rank", "reminder"}:
+                    displayed["persistent"] = True
 
     def _new_event(self, now, marker):
         self.state = {
             "version": 1, "event": uuid.uuid4().hex, "start": marker or now,
             "marker": marker, "mode": "event", "plays": {}, "current": None,
             "watermarks": [2, 2, 2], "sent": [], "lastReminder": 0,
-            "active": None, "pending": None,
+            "active": None, "pending": None, "displayed": None,
         }
         self.rebase = True
 
@@ -158,13 +168,21 @@ class Director:
             state["lastReminder"] = now
         if message:
             message.update(id=uuid.uuid4().hex, createdAt=now, expiresAt=now + DISPLAY_SECONDS,
+                           persistent=message["kind"] in {"rank", "reminder"},
                            title=current["title"] if message["kind"] != "reminder" else "",
                            artist=current["artist"] if message["kind"] != "reminder" else "")
             state["active"] = message
+            state["displayed"] = message
             state["sent"].append(now)
             watched["notices"] += 1
         state["pending"] = pending
-        return state["active"]
+        # Display retention is independent of the existing 14-second scheduling
+        # window. It cannot block future eligibility, cooldowns or hourly limits.
+        displayed = state.get("displayed")
+        if mode not in ("event", "closing") or (displayed and displayed["kind"] == "risk" and
+                (now >= displayed["expiresAt"] or state["active"] is None)):
+            state["displayed"] = None
+        return state.get("displayed")
 
 
 def _row(song, at):
