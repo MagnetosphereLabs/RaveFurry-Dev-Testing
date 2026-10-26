@@ -42,6 +42,7 @@ export class HistoryTimeline {
     document.addEventListener('furatic:queue-panel-change', this.onPanelChange);
     document.addEventListener('visibilitychange', this.onVisibility);
     window.addEventListener('pagehide', this.onPageHide);
+    window.addEventListener('pageshow', this.onPageShow);
     if (typeof ResizeObserver === 'function') {
       this.observer = new ResizeObserver(this.onResize);
       this.observer.observe(this.scroll);
@@ -116,7 +117,9 @@ export class HistoryTimeline {
     this.generation++;
     if (this.songs.some(row => row.occurrenceId === song.occurrenceId)) return;
     const anchor = this.capture();
-    this.songs = [{...song, id: null, pendingHistory: true, endedAt: new Date().toISOString()}, ...this.songs].slice(0, 50);
+    this.songs = [{...song, id: null, pendingHistory: true,
+      ownedHistory: document.getElementById('current-song')?.classList.contains('furatic-owned-song') || false,
+      ownershipSeed: song.queueKey, endedAt: new Date().toISOString()}, ...this.songs].slice(0, 50);
     this.render([...this.songs].reverse(), true, () => this.restore(anchor));
   }
 
@@ -262,7 +265,13 @@ export class HistoryTimeline {
       if (!this.disposed) { const anchor = this.capture(); this.restore(anchor); }
     });
   };
-  private onVisibility = () => { if (document.hidden) this.stop(); else this.refresh(); };
+  private resume = () => {
+    if (this.disposed) return;
+    this.center();
+    this.refresh();
+  };
+  private onVisibility = () => { if (document.hidden) this.stop(); else this.resume(); };
+  private onPageShow = (event: PageTransitionEvent) => { if (event.persisted) this.resume(); };
   private onPageHide = (event: PageTransitionEvent) => { if (!event.persisted) this.dispose(); else this.stop(); };
 
   dispose() {
@@ -281,5 +290,6 @@ export class HistoryTimeline {
     document.removeEventListener('furatic:queue-panel-change', this.onPanelChange);
     document.removeEventListener('visibilitychange', this.onVisibility);
     window.removeEventListener('pagehide', this.onPageHide);
+    window.removeEventListener('pageshow', this.onPageShow);
   }
 }
