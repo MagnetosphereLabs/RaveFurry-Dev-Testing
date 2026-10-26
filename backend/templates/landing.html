@@ -1759,6 +1759,7 @@
         let latestNotificationId = 0;
         let primed = false;
         let pollTimer = 0;
+        let notificationRequest = null;
 
         function normalizeText(value, fallback) {
           const text = String(value || "").trim();
@@ -1821,10 +1822,14 @@
         }
 
         async function pollNotifications() {
+          if (notificationRequest || document.hidden) return;
+          const controller = new AbortController();
+          notificationRequest = controller;
+          const timeout = window.setTimeout(() => controller.abort(), 8000);
           try {
             const response = await fetch(endpoint + "?after=" + latestNotificationId, {
               cache: "no-store",
-              credentials: "same-origin",
+              credentials: "same-origin", signal: controller.signal,
             });
 
             if (!response.ok) {
@@ -1832,6 +1837,11 @@
             }
 
             const data = await response.json();
+            if (data.siteMode === "afterhours") {
+              window.clearInterval(pollTimer);
+              pollMode();
+              return;
+            }
             const notifications = Array.isArray(data.notifications)
               ? data.notifications
               : [];
@@ -1852,6 +1862,9 @@
             }
           } catch (_error) {
             // Silent retry. Notifications are non-critical UI.
+          } finally {
+            window.clearTimeout(timeout);
+            if (notificationRequest === controller) notificationRequest = null;
           }
         }
 
@@ -1859,6 +1872,7 @@
         pollTimer = window.setInterval(pollNotifications, 2500);
 
         window.addEventListener("beforeunload", function () {
+          notificationRequest?.abort();
           if (pollTimer) {
             window.clearInterval(pollTimer);
           }
@@ -1866,10 +1880,15 @@
       })();
       
       let redirectingToAfterHours = false;
+      let modeRequest = null;
       
       async function pollMode() {
+        if (modeRequest || document.hidden || redirectingToAfterHours) return;
+        const controller = new AbortController();
+        modeRequest = controller;
+        const timeout = window.setTimeout(() => controller.abort(), 8000);
         try {
-          const response = await fetch("/api/site-mode/", { cache: "no-store" });
+          const response = await fetch("/api/site-mode/", { cache: "no-store", signal: controller.signal });
           if (!response.ok) return;
           const data = await response.json();
       
@@ -1892,11 +1911,15 @@
           }
         } catch (_error) {
           // silent retry
+        } finally {
+          window.clearTimeout(timeout);
+          if (modeRequest === controller) modeRequest = null;
         }
       }
-      
+      window.addEventListener("pagehide", () => modeRequest?.abort());
       setInterval(pollMode, 7000);
     </script>
     {% include "partials/tutorial.html" %}
   </body>
 </html>
+
