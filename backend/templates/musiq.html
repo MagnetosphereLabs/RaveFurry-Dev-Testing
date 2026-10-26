@@ -60,9 +60,9 @@
 	</li>
 	<li class="list-group-item" id="song-votes"{% if not "vot" in interactivity %} style="display: none"{%endif%}>
 		<div class="current-song-vote-indicators" id="current-song-upvote-indicators"></div>
-		<i class="fas fa-chevron-circle-up vote-up"></i>
+		<button type="button" class="fas fa-chevron-circle-up vote-up"></button>
 		<span id="current-song-votes"></span>
-		<i class="fas fa-chevron-circle-down vote-down"></i>
+		<button type="button" class="fas fa-chevron-circle-down vote-down"></button>
 		<div class="current-song-vote-indicators" id="current-song-downvote-indicators"></div>
 	</li>
 	<li class="list-group-item" id="song-controls"{% if not controls_enabled %} style="display: none"{%endif%}>
