@@ -14,9 +14,14 @@ from django.conf import settings as conf
 
 from core.musiq import song_utils
 from core.musiq.display_name import clean_display_names
-from core.safe_files import atomic_write_text, retry_file_operation, safe_unlink
+from core.safe_files import atomic_write_text, retry_file_operation, safe_unlink, OptionalFileStatus
 
 LOGGER = logging.getLogger(__name__)
+_tick_status = OptionalFileStatus("OBS current-song text", LOGGER)
+_export_status = OptionalFileStatus("OBS queue text", LOGGER)
+_export_condition = threading.Condition()
+_export_pending = None
+_export_worker = None
 MAX_QUEUE_FILES = 99
 _worker: threading.Thread | None = None
 _worker_lock = threading.Lock()
@@ -38,7 +43,7 @@ def _stringify(value: Any) -> str:
     return str(value)
 
 
-def _write_lines(path: Path, lines: Iterable[str], *, attempts: int = 8) -> None:
+def _write_lines(path: Path, lines: Iterable[str], *, attempts: int = 1) -> None:
     payload = "\n".join(_stringify(line) for line in lines) + "\n"
     atomic_write_text(path, payload, encoding="utf-8", attempts=attempts, logger=LOGGER)
 
@@ -168,6 +173,8 @@ def start() -> None:
 
 def stop() -> None:
     _stop.set()
+    with _export_condition:
+        _export_condition.notify_all()
     from core import obs_notifications
     obs_notifications.stop()
 
@@ -255,12 +262,16 @@ def write_current_song_tick(
         # Retry soon with a fresh timestamp rather than blocking for seconds
         # in Windows sharing-violation backoff with a stale payload.
         _write_lines(output_dir / "songcurrent.txt", current_lines, attempts=1)
+        _tick_status.succeeded()
         return True
+    except OSError as error:
+        _tick_status.failed(error)
+        return False
     except Exception:  # pylint: disable=broad-except
         LOGGER.exception("failed to write OBS current song tick")
         return False
 
-def write_from_state(state: Dict[str, Any]) -> None:
+def _write_from_state(state: Dict[str, Any]) -> bool:
     """Write songcurrent.txt and songqueue*.txt files for OBS / overlays."""
     try:
         musiq_state = state.get("musiq") or {}
@@ -318,6 +329,49 @@ def write_from_state(state: Dict[str, Any]) -> None:
                 continue
             index = int(suffix)
             if index < 1 or index > len(queue):
-                safe_unlink(stale_path, missing_ok=True, logger=LOGGER)
+                safe_unlink(stale_path, missing_ok=True, attempts=1, logger=LOGGER)
+        _export_status.succeeded()
+        return True
+    except OSError as error:
+        _export_status.failed(error)
+        return False
     except Exception:  # pylint: disable=broad-except
         LOGGER.exception("failed to write OBS export files")
+        return True  # An invalid payload cannot be repaired by retrying it.
+
+
+
+
+def write_from_state(state: Dict[str, Any]) -> None:
+    """Coalesce exports into one latest snapshot, never block music on disk IO."""
+    global _export_pending, _export_worker
+    with _export_condition:
+        if _stop.is_set():
+            return
+        _export_pending = state
+        if _export_worker is None or not _export_worker.is_alive():
+            _export_worker = threading.Thread(target=_export_loop, name="obs-queue-export", daemon=True)
+            _export_worker.start()
+        _export_condition.notify()
+
+
+def _export_loop() -> None:
+    global _export_pending, _export_worker
+    try:
+        while not _stop.is_set():
+            with _export_condition:
+                _export_condition.wait_for(lambda: _export_pending is not None or _stop.is_set(), timeout=10)
+                if _stop.is_set() or _export_pending is None:
+                    if _export_worker is threading.current_thread():
+                        _export_worker = None
+                    return
+                state, _export_pending = _export_pending, None
+            if _write_from_state(state) is False:
+                with _export_condition:
+                    if _export_pending is None:
+                        _export_pending = state
+                _stop.wait(1)
+    finally:
+        with _export_condition:
+            if _export_worker is threading.current_thread():
+                _export_worker = None
