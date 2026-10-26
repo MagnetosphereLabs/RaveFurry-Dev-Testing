@@ -19,6 +19,8 @@ from django.shortcuts import redirect, render
 from django.utils import timezone
 from django.views.decorators.clickjacking import xframe_options_sameorigin
 from django.views.decorators.csrf import csrf_exempt
+from django.views.decorators.http import require_POST
+from core.input_validation import music_query
 
 from core import audit_log, base, obs_export, redis, site_mode, user_manager, util
 from core.models import CurrentSong, QueuedSong
@@ -260,6 +262,7 @@ def _format_cooldown_remaining(seconds: int) -> str:
 
 # accessed by the discord bot
 @csrf_exempt
+@require_POST
 @user_manager.tracked
 def request_music(request: WSGIRequest) -> HttpResponse:
     """Endpoint to request music."""
@@ -276,8 +279,14 @@ def request_music(request: WSGIRequest) -> HttpResponse:
     playlist = request.POST.get("playlist") == "true"
     platform = request.POST.get("platform")
 
-    if query is None:
-        return HttpResponseBadRequest("No query given")
+    try:
+        if any(len(request.POST.getlist(name)) > 1 for name in ("query", "key", "playlist", "platform")):
+            raise ValueError("Please submit one song request at a time.")
+        if key_param and (len(key_param) > 18 or not key_param.isascii() or not key_param.isdigit()):
+            raise ValueError("Invalid song selection. Please select the song again.")
+        query = "" if key_param and query in (None, "") else music_query(query, playlist=playlist)
+    except ValueError as error:
+        return HttpResponseBadRequest(str(error))
 
     requester_ip = user_manager.get_client_ip(request)
     session_key = user_manager.normalize_session_key(request.session.session_key or "")
@@ -303,11 +312,17 @@ def request_music(request: WSGIRequest) -> HttpResponse:
     key = None
     if key_param:
         key = int(key_param)
+        from core.models import ArchivedPlaylist, ArchivedSong
+        archive = ArchivedPlaylist if playlist else ArchivedSong
+        if not archive.objects.filter(pk=key).exists():
+            return HttpResponseBadRequest("That saved song selection is no longer available. Please search again.")
 
     try:
         providers = get_providers(query, key, playlist, platform)
     except ProviderError as error:
         return HttpResponseBadRequest(str(error))
+    except ValueError:
+        return HttpResponseBadRequest("That music selection is not valid. Please search again.")
 
     if playlist:
         provider = try_providers(
@@ -601,7 +616,7 @@ def state_dict() -> Dict[str, Any]:
         song_dict["durationFormatted"] = song_utils.format_seconds(
             song_dict["duration"]
         )
-        if storage.get("color_indication"):
+        if storage.get("color_indication") != storage.Privileges.nobody:
             engagement = redis.connection.get(f"engagement-{song.id}")
             _add_color_indication(engagement, song_dict)
         song_queue.append(song_dict)
@@ -645,3 +660,4 @@ def update_state() -> None:
     state = state_dict()
     obs_export.write_from_state(state)
     send_state(state)
+
