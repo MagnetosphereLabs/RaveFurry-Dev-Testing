@@ -10,6 +10,9 @@ import math
 import os
 import shutil
 import subprocess
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
@@ -18,12 +21,24 @@ from urllib.parse import unquote, urlparse
 from django.conf import settings as conf
 
 from core.settings import storage
+from core.safe_files import atomic_write_text
 
 logger = logging.getLogger(__name__)
 
 CACHE_FILE = Path(conf.BASE_DIR) / "config" / "audio_tail_cache.json"
 CACHE_VERSION = 1
 MAX_CACHE_ENTRIES = 512
+
+# Requests and playback only read this bounded cache. Decoding and optional
+# persistence belong to at most two workers, with at most eight jobs in flight.
+_cache_lock = threading.RLock()
+_write_lock = threading.Lock()
+_cache = None
+_pending = {}
+_failed_until = {}
+_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="audio-tail")
+_last_cache_warning = -float("inf")
+ANALYSIS_TIMEOUT_SECONDS = 60
 
 SAMPLE_RATE = 8000
 SAMPLE_WIDTH = 2
@@ -91,10 +106,18 @@ def _read_cache() -> dict[str, Any]:
     try:
         with CACHE_FILE.open("r", encoding="utf-8") as infile:
             data = json.load(infile)
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
+    except (FileNotFoundError, json.JSONDecodeError, UnicodeError, OSError):
         return {}
 
     return data if isinstance(data, dict) else {}
+
+
+def _cache_age(item):
+    try:
+        age = float(item.get("analyzed_at", 0))
+        return age if math.isfinite(age) else 0.0
+    except (AttributeError, TypeError, ValueError):
+        return 0.0
 
 
 def _write_cache(cache: dict[str, Any]) -> None:
@@ -103,18 +126,12 @@ def _write_cache(cache: dict[str, Any]) -> None:
     if len(cache) > MAX_CACHE_ENTRIES:
         sorted_items = sorted(
             cache.items(),
-            key=lambda item: float(item[1].get("analyzed_at", 0.0))
-            if isinstance(item[1], dict)
-            else 0.0,
+            key=lambda item: _cache_age(item[1]),
         )
         cache = dict(sorted_items[-MAX_CACHE_ENTRIES:])
 
-    temp_file = CACHE_FILE.with_suffix(".tmp")
-    with temp_file.open("w", encoding="utf-8") as outfile:
-        json.dump(cache, outfile, indent=2, sort_keys=True)
-        outfile.write("\n")
-
-    os.replace(temp_file, CACHE_FILE)
+    atomic_write_text(CACHE_FILE, json.dumps(cache, sort_keys=True) + "\n",
+                      attempts=2, logger=logger)
 
 
 def _cache_key(
@@ -147,12 +164,19 @@ def _analysis_from_cache_item(item: Any) -> Optional[TailAnalysis]:
         return None
 
     try:
-        return TailAnalysis(
+        result = TailAnalysis(
             effective_duration=float(item["effective_duration"]),
             original_duration=float(item["original_duration"]),
             trimmed_seconds=float(item["trimmed_seconds"]),
             threshold_db=float(item["threshold_db"]),
         )
+        if not all(math.isfinite(value) for value in (
+                result.effective_duration, result.original_duration,
+                result.trimmed_seconds, result.threshold_db)):
+            return None
+        if not 0 <= result.effective_duration <= result.original_duration:
+            return None
+        return result
     except (KeyError, TypeError, ValueError):
         return None
 
@@ -222,6 +246,8 @@ def _analyze_path(
         creationflags = subprocess.CREATE_NO_WINDOW
 
     process = None
+    deadline = None
+    timed_out = threading.Event()
     elapsed = 0.0
     last_loud_end = 0.0
     chunk_size = int(SAMPLE_RATE * SAMPLE_WIDTH * CHUNK_SECONDS)
@@ -234,6 +260,18 @@ def _analyze_path(
             stdin=subprocess.DEVNULL,
             creationflags=creationflags,
         )
+
+        def terminate_stalled_decoder():
+            timed_out.set()
+            try:
+                process.kill()
+            except OSError:
+                pass
+
+        # read() on a stalled decoder can block before wait(timeout) is reached.
+        deadline = threading.Timer(ANALYSIS_TIMEOUT_SECONDS, terminate_stalled_decoder)
+        deadline.daemon = True
+        deadline.start()
 
         assert process.stdout is not None
 
@@ -266,6 +304,22 @@ def _analyze_path(
         logger.warning("audio tail analysis failed for %s: %s", path, error)
         if process is not None and process.poll() is None:
             process.kill()
+        return None
+    finally:
+        if deadline is not None:
+            deadline.cancel()
+        if process is not None:
+            if process.stdout is not None:
+                process.stdout.close()
+            if process.poll() is None:
+                process.kill()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
+
+    if timed_out.is_set() or process.returncode != 0:
+        logger.warning("audio tail decoder did not complete; using full song duration: %s", path)
         return None
 
     if original_duration <= 0 and elapsed > 0:
@@ -312,81 +366,115 @@ def _analyze_path(
     return result
 
 
-def analyze_and_cache(uri: str, duration: Optional[float]) -> Optional[TailAnalysis]:
+def _cache_warning(error) -> None:
+    global _last_cache_warning
+    now = time.monotonic()
+    with _cache_lock:
+        if now - _last_cache_warning < 60:
+            return
+        _last_cache_warning = now
+    logger.warning("audio tail cache persistence deferred; analysis remains in memory: %s", error)
+
+
+def _analyze_job(key, path, arguments):
+    try:
+        result = _analyze_path(path, *arguments)
+        with _cache_lock:
+            if result is None:
+                _failed_until[key] = time.monotonic() + 60
+                while len(_failed_until) > MAX_CACHE_ENTRIES:
+                    _failed_until.pop(next(iter(_failed_until)))
+                return None
+            _cache[key] = {
+                "effective_duration": result.effective_duration,
+                "original_duration": result.original_duration,
+                "trimmed_seconds": result.trimmed_seconds,
+                "threshold_db": result.threshold_db,
+                "source": str(path), "analyzed_at": time.time(),
+            }
+            while len(_cache) > MAX_CACHE_ENTRIES:
+                oldest = min(_cache, key=lambda k: _cache_age(_cache[k]))
+                _cache.pop(oldest)
+        # Only decoder workers write. A Windows sharing violation cannot escape
+        # into an HTTP request, the OBS ticker, or the playback loop.
+        try:
+            with _write_lock:
+                with _cache_lock:
+                    snapshot = dict(_cache)
+                _write_cache(snapshot)
+        except OSError as error:
+            _cache_warning(error)
+        return result
+    except Exception:
+        with _cache_lock:
+            _failed_until[key] = time.monotonic() + 60
+            while len(_failed_until) > MAX_CACHE_ENTRIES:
+                _failed_until.pop(next(iter(_failed_until)))
+        logger.exception("optional audio tail analysis failed; using full song duration")
+        return None
+
+
+def _analysis_request(uri: str, duration):
+    global _cache
     if not enabled():
-        return None
-
+        return None, None
     try:
-        original_duration = float(duration or 0.0)
-    except (TypeError, ValueError):
-        original_duration = 0.0
-
-    if original_duration <= 0:
-        return None
-
-    path = _uri_to_path(uri)
-    if path is None or not path.exists() or not path.is_file():
-        return None
-
-    threshold_db = _setting_float("silence_tail_threshold_db", -45.0)
-    min_tail_seconds = max(0.0, _setting_float("silence_tail_min_seconds", 5.0))
-    padding_seconds = max(0.0, _setting_float("silence_tail_padding_seconds", 2.0))
-    start_grace_seconds = max(0.0, _setting_float("silence_tail_start_grace_seconds", 10.0))
-
-    try:
-        key = _cache_key(
-            path,
-            original_duration,
-            threshold_db,
-            min_tail_seconds,
-            padding_seconds,
-            start_grace_seconds,
+        original = float(duration or 0.0)
+        if not math.isfinite(original) or original <= 0:
+            return None, None
+        path = _uri_to_path(uri)
+        if path is None or not path.is_file():
+            return None, None
+        arguments = (
+            original, _setting_float("silence_tail_threshold_db", -45.0),
+            max(0.0, _setting_float("silence_tail_min_seconds", 5.0)),
+            max(0.0, _setting_float("silence_tail_padding_seconds", 2.0)),
+            max(0.0, _setting_float("silence_tail_start_grace_seconds", 10.0)),
         )
-    except OSError as error:
-        logger.warning("could not create audio tail cache key for %s: %s", path, error)
+        key = _cache_key(path, *arguments)
+    except (OSError, ValueError, TypeError):
+        return None, None
+    with _cache_lock:
+        if _cache is None:
+            loaded = _read_cache()
+            # Do not let malformed optional cache entries break normal playback.
+            valid = [(k, v) for k, v in loaded.items()
+                     if _analysis_from_cache_item(v) is not None]
+            _cache = dict(valid[-MAX_CACHE_ENTRIES:])
+        result = _analysis_from_cache_item(_cache.get(key))
+        if result is not None:
+            return result, None
+        if key in _pending:
+            return None, _pending[key]
+        if _failed_until.get(key, 0) > time.monotonic() or len(_pending) >= 8:
+            return None, None
+        future = _executor.submit(_analyze_job, key, path, arguments)
+        _pending[key] = future
+        def completed(done):
+            with _cache_lock:
+                if _pending.get(key) is done:
+                    _pending.pop(key, None)
+        future.add_done_callback(completed)
+        return None, future
+
+
+def analyze_and_cache(uri: str, duration: Optional[float]) -> Optional[TailAnalysis]:
+    """Precompute in the existing download task; deduplicate concurrent requests."""
+    result, future = _analysis_request(uri, duration)
+    if result is not None or future is None:
+        return result
+    try:
+        return future.result(timeout=ANALYSIS_TIMEOUT_SECONDS + 5)
+    except FutureTimeout:
         return None
-
-    cache = _read_cache()
-    cached_result = _analysis_from_cache_item(cache.get(key))
-    if cached_result is not None:
-        return cached_result
-
-    result = _analyze_path(
-        path,
-        original_duration,
-        threshold_db,
-        min_tail_seconds,
-        padding_seconds,
-        start_grace_seconds,
-    )
-    if result is None:
-        return None
-
-    cache[key] = {
-        "effective_duration": result.effective_duration,
-        "original_duration": result.original_duration,
-        "trimmed_seconds": result.trimmed_seconds,
-        "threshold_db": result.threshold_db,
-        "source": str(path),
-        "analyzed_at": __import__("time").time(),
-    }
-    _write_cache(cache)
-    return result
 
 
 def effective_duration_for_song(song) -> float:
+    """Nonblocking presentation/playback lookup; optional work stays off this thread."""
     duration = float(getattr(song, "duration", 0.0) or 0.0)
-    if duration <= 0:
-        return duration
-
-    uri = (
-        getattr(song, "internal_url", "")
-        or getattr(song, "stream_url", "")
-        or getattr(song, "external_url", "")
-    )
-
-    result = analyze_and_cache(str(uri or ""), duration)
-    if result is None:
-        return duration
-
-    return min(duration, max(0.0, result.effective_duration))
+    if not math.isfinite(duration) or duration <= 0:
+        return 0.0
+    uri = (getattr(song, "internal_url", "") or getattr(song, "stream_url", "")
+           or getattr(song, "external_url", ""))
+    result, _ = _analysis_request(str(uri or ""), duration)
+    return duration if result is None else min(duration, max(0.0, result.effective_duration))
