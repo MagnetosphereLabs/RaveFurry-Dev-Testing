@@ -1707,6 +1707,16 @@
         window.addEventListener("message", function (event) {
           if (event.source === background.contentWindow && event.origin === window.location.origin &&
               event.data?.type === "furatic:visualizer-ready") document.getElementById("stream-background").classList.add("is-ready");
+          if (event.source === background.contentWindow && event.origin === window.location.origin &&
+              event.data?.type === "furatic:card-surface-scene" && !document.hidden) {
+            const player = document.getElementById("queue-player-frame");
+            const bounds = background.getBoundingClientRect(), frame = player?.getBoundingClientRect();
+            if (frame && bounds.width > 0 && bounds.height > 0) player.contentWindow?.postMessage({
+              type: "furatic:card-surface-scene", scene: event.data.scene,
+              viewport: {x: (frame.left - bounds.left) / bounds.width, y: (frame.top - bounds.top) / bounds.height,
+                width: frame.width / bounds.width, height: frame.height / bounds.height}
+            }, window.location.origin);
+          }
         });
         await Promise.race([logo.decode?.().catch(() => undefined), new Promise(resolve => window.setTimeout(resolve, 2500))]);
         if (reduced || typeof logo.animate !== "function") { reveal(); return; }
