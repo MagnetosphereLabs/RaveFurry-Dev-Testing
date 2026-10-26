@@ -16,6 +16,8 @@ from typing import Any, Dict, Iterator, List, Optional, cast
 from urllib.parse import parse_qs, urlparse
 
 import requests
+from core.input_validation import VIDEO_ID, youtube_video_id
+
 import yt_dlp
 import ytmusicapi
 from django.conf import settings
@@ -35,7 +37,9 @@ def youtube_session() -> Iterator[requests.Session]:
     session = requests.session()
     # Have yt-dlp deal with consent cookies etc to setup a valid session
     extractor = yt_dlp.extractor.youtube.YoutubeIE()
-    extractor._downloader = yt_dlp.YoutubeDL()
+    extractor._downloader = yt_dlp.YoutubeDL({
+        "socket_timeout": 25, "retries": 1, "extractor_retries": 1,
+    })
     extractor.initialize()
     session.cookies.update(extractor._downloader.cookiejar)
 
@@ -163,37 +167,19 @@ class YoutubeSongProvider(SongProvider, Youtube):
 
     @staticmethod
     def _normalize_host(url: str) -> str:
-        host = urlparse(url).netloc.lower().split(":", 1)[0]
-        if host.startswith("www."):
-            host = host[4:]
-        return host
+        try:
+            return (urlparse(url).hostname or "").lower().removeprefix("www.")
+        except ValueError:
+            return ""
 
     @staticmethod
     def _is_youtube_host(host: str) -> bool:
-        return (
-            host == "youtu.be"
-            or host == "youtube.com"
-            or host.endswith(".youtube.com")
-            or host.startswith("youtube.")
-        )
+        return host in {"youtube.com", "m.youtube.com", "music.youtube.com",
+                        "youtu.be", "youtube-nocookie.com"}
 
     @staticmethod
     def get_id_from_external_url(url: str) -> str:
-        parsed = urlparse(url)
-        host = YoutubeSongProvider._normalize_host(url)
-
-        if host == "youtu.be":
-            video_id = parsed.path.strip("/").split("/", 1)[0]
-            if video_id:
-                return video_id
-            raise KeyError("missing youtube video id")
-
-        if YoutubeSongProvider._is_youtube_host(host):
-            video_ids = parse_qs(parsed.query).get("v")
-            if video_ids and video_ids[0]:
-                return video_ids[0]
-
-        raise KeyError("missing youtube video id")
+        return youtube_video_id(url)
 
     def __init__(self, query: Optional[str], key: Optional[int]) -> None:
         self.type = "youtube"
@@ -227,7 +213,7 @@ class YoutubeSongProvider(SongProvider, Youtube):
 
                 try:
                     self.id = self.get_id_from_external_url(query)
-                except KeyError:
+                except (KeyError, ValueError):
                     self.error = "Please paste a valid YouTube video link."
                     return False
 
@@ -397,8 +383,8 @@ class YoutubeSongProvider(SongProvider, Youtube):
 
     def get_path(self) -> str:
         """Return the path in the local filesystem to the cached sound file of this song."""
-        if not self.id:
-            raise ValueError()
+        if not self.id or not VIDEO_ID.fullmatch(self.id):
+            raise ValueError("Invalid YouTube video ID")
         return song_utils.get_path(self.id + ".m4a")
 
     def get_internal_url(self) -> str:
@@ -540,3 +526,4 @@ class YoutubePlaylistProvider(PlaylistProvider, Youtube):
         assert self.key is None
 
         return True
+
