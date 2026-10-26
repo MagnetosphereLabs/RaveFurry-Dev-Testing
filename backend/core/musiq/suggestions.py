@@ -7,6 +7,7 @@ import logging
 import random
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 
 from typing import Any, Callable, Dict, Iterable, List, Mapping, TypedDict, Union, cast
 
@@ -16,6 +17,7 @@ from django.db.models.functions import Greatest
 from django.http import HttpResponseBadRequest
 from django.http.response import HttpResponse, JsonResponse
 
+from core.input_validation import music_query
 from core import redis
 from core.models import ArchivedPlaylist, ArchivedQuery, ArchivedSong
 from core.musiq import song_utils
@@ -24,6 +26,8 @@ from core.settings.storage import PlatformEnabled, PlatformSuggestions
 from main import settings
 
 ONLINE_SUGGESTION_TIMEOUT_SECONDS = 3
+_suggestion_workers = ThreadPoolExecutor(max_workers=8, thread_name_prefix="suggestions")
+_suggestion_slots = threading.BoundedSemaphore(16)
 
 u_values_list = [
     "u_id",
@@ -51,7 +55,7 @@ def random_suggestion(request: WSGIRequest) -> HttpResponse:
     """This method returns a random suggestion from the database.
     Depending on the value of :param playlist:,
     either a previously pushed playlist or song is returned."""
-    suggest_playlist = request.GET["playlist"] == "true"
+    suggest_playlist = request.GET.get("playlist", "false") == "true"
     if not suggest_playlist:
         if ArchivedSong.objects.count() == 0:
             return HttpResponseBadRequest("No songs to suggest from")
@@ -74,8 +78,11 @@ def random_suggestion(request: WSGIRequest) -> HttpResponse:
 
 def online_suggestions(request: WSGIRequest) -> JsonResponse:
     """Returns online suggestions for a given query."""
-    query = request.GET["term"]
-    suggest_playlist = request.GET["playlist"] == "true"
+    try:
+        query = music_query(request.GET.get("term", ""), partial=True)
+    except ValueError:
+        return JsonResponse([], safe=False)
+    suggest_playlist = request.GET.get("playlist", "false") == "true"
 
     if storage.get("new_music_only"):
         return JsonResponse([], safe=False)
@@ -155,6 +162,12 @@ def online_suggestions(request: WSGIRequest) -> JsonResponse:
                 fetcher()
             except Exception:  # pylint: disable=broad-except
                 logging.exception("online %s suggestions failed", platform)
+            finally:
+                from django.db import connections
+                try:
+                    connections.close_all()
+                finally:
+                    _suggestion_slots.release()
 
         for platform in ["youtube", "spotify", "soundcloud", "jamendo"]:
             if (
@@ -162,24 +175,26 @@ def online_suggestions(request: WSGIRequest) -> JsonResponse:
                 and storage.get(cast(PlatformSuggestions, f"{platform}_suggestions"))
                 > 0
             ):
-                thread = threading.Thread(
-                    target=safe_fetch,
-                    args=(platform, suggestion_fetchers[platform]),
-                    daemon=True,
-                )
-                threads.append(thread)
-                thread.start()
+                if _suggestion_slots.acquire(blocking=False):
+                    try:
+                        threads.append(_suggestion_workers.submit(safe_fetch, platform, suggestion_fetchers[platform]))
+                    except RuntimeError:
+                        _suggestion_slots.release()
 
         deadline = time.monotonic() + ONLINE_SUGGESTION_TIMEOUT_SECONDS
-        for thread in threads:
+        for future in threads:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 break
-            thread.join(remaining)
-
-        for thread in threads:
-            if thread.is_alive():
-                logging.warning("online suggestion provider timed out")
+            try:
+                future.result(timeout=remaining)
+            except FutureTimeout:
+                break
+        # Providers may complete after this response's deadline. Take a stable
+        # copy; a late result must not mutate a response during serialization.
+        with results_lock:
+            response_results = list(results)
+        return JsonResponse(response_results, safe=False)
 
     return JsonResponse(results, safe=False)
 
@@ -445,8 +460,11 @@ def _offline_song_suggestions(query: str) -> List[SuggestionResult]:
 
 def offline_suggestions(request: WSGIRequest) -> JsonResponse:
     """Returns offline suggestions for a given query."""
-    query = request.GET["term"]
-    suggest_playlist = request.GET["playlist"] == "true"
+    try:
+        query = music_query(request.GET.get("term", ""), partial=True)
+    except ValueError:
+        return JsonResponse([], safe=False)
+    suggest_playlist = request.GET.get("playlist", "false") == "true"
 
     if storage.get("new_music_only"):
         return JsonResponse([], safe=False)
@@ -457,3 +475,4 @@ def offline_suggestions(request: WSGIRequest) -> JsonResponse:
         results = _offline_song_suggestions(query)
 
     return JsonResponse(results, safe=False)
+
