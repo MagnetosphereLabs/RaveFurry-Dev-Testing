@@ -22,7 +22,7 @@
   } catch (_) { /* Storage can be disabled in OBS; server cooldowns still apply. */ }
   let stopped = false, obsVisible = true, contextReady = true;
   let pollTimer = 0, hideTimer = 0, releaseTimer = 0, requestTimer = 0;
-  let controller = null, active = '', generation = 0;
+  let controller = null, active = '', generation = 0, pendingMessage = null;
   const visible = () => !stopped && obsVisible && contextReady && !document.hidden;
   const motion = new Set();
   const sheen = root.querySelector('.vote-notice-sheen');
@@ -100,30 +100,19 @@
         releaseTimer = 0;
         cancelMotion();
         root.hidden = true; // Releases the blurred compositor surface after exit.
+        const next = pendingMessage;
+        pendingMessage = null;
+        if (next) show(next);
       }, 650);
     }
   }
 
-  function receive(value) {
-    const message = value && value.version === 1 && value.message;
+  function show(message) {
+    if (!visible()) return;
     const now = Date.now() / 1000;
-    if (!message || !Number.isFinite(value.updatedAt) || now - value.updatedAt > 10 ||
-        now < value.updatedAt || !Number.isFinite(message.expiresAt) ||
-        message.expiresAt <= now) {
-      if (active) hide();
-      return;
-    }
-    if (message.id === active) return;
-    if (active || !visible() || typeof message.id !== 'string' || message.id === seen ||
-        !Number.isFinite(message.createdAt) || now < message.createdAt || now - message.createdAt > 6 ||
-        message.expiresAt - message.createdAt > 14.1 ||
-        (lastShown && now - lastShown < 60) ||
-        !['rank', 'risk', 'reminder'].includes(message.kind)) return;
+    if (!message.persistent && message.expiresAt <= now) return;
     const rank = message.kind === 'rank' ? message.rank : 0;
-    if (message.kind === 'rank' && ![1, 2, 3].includes(rank)) return;
-    for (const name of ['headline', 'detail', 'footer']) {
-      if (typeof message[name] !== 'string' || message[name].length > 240) return;
-    }
+    const restoring = message.id === seen;
     clearTimeout(releaseTimer); releaseTimer = 0;
     for (const name of ['headline', 'title', 'artist', 'detail', 'footer']) {
       // Metadata is text, never HTML. One fixed card is reused for every notice.
@@ -132,15 +121,50 @@
     fields.ordinal.textContent = rank ? ['', '1st', '2nd', '3rd'][rank] : '';
     root.dataset.rank = String(rank);
     root.dataset.kind = message.kind;
-    root.classList.remove('is-visible');
     root.hidden = false;
     root.classList.add('is-visible');
     root.setAttribute('aria-hidden', 'false');
-    enter(rank);
+    if (!restoring) enter(rank);
     active = seen = message.id;
-    lastShown = now;
-    try { localStorage.setItem(storageKey, JSON.stringify({id: seen, at: now})); } catch (_) { /* optional */ }
-    hideTimer = setTimeout(() => hide(), Math.min(14, message.expiresAt - now) * 1000);
+    if (!restoring) {
+      lastShown = now;
+      try { localStorage.setItem(storageKey, JSON.stringify({id: seen, at: now})); } catch (_) { /* optional */ }
+    }
+    if (!message.persistent) hideTimer = setTimeout(() => hide(), Math.min(14, message.expiresAt - now) * 1000);
+  }
+
+  function receive(value) {
+    const now = Date.now() / 1000;
+    // A short server restart must not erase a retained achievement. A fresh
+    // explicit null is the authoritative event-end / expired-warning clear.
+    if (!value || value.version !== 1 || !Number.isFinite(value.updatedAt) ||
+        now - value.updatedAt > 10 || now < value.updatedAt) return;
+    const message = value.message;
+    if (!message) {
+      pendingMessage = null;
+      if (active) hide();
+      return;
+    }
+    const persistent = message.persistent === true && ['rank', 'reminder'].includes(message.kind);
+    if (!Number.isFinite(message.expiresAt) || !Number.isFinite(message.createdAt) ||
+        now < message.createdAt || message.expiresAt - message.createdAt > 14.1 ||
+        (!persistent && (message.expiresAt <= now || now - message.createdAt > 6)) ||
+        typeof message.id !== 'string' || !['rank', 'risk', 'reminder'].includes(message.kind)) return;
+    const rank = message.kind === 'rank' ? message.rank : 0;
+    if (message.kind === 'rank' && ![1, 2, 3].includes(rank)) return;
+    for (const name of ['headline', 'detail', 'footer']) {
+      if (typeof message[name] !== 'string' || message[name].length > 240) return;
+    }
+    if (message.id === active || message.id === pendingMessage?.id || !visible()) return;
+    if (message.id === seen && !persistent ||
+        message.id !== seen && lastShown && now - lastShown < 60) return;
+    const next = {...message, persistent};
+    if (active || releaseTimer) {
+      // One replacement slot, never a queue. Keep the old text until its exit
+      // finishes, then reuse the same DOM card for the newest accepted message.
+      pendingMessage = next;
+      if (active) hide();
+    } else show(next);
   }
 
   async function poll() {
@@ -156,7 +180,7 @@
       if (body.length > 8192) throw new Error('Oversized notification');
       if (visible() && ticket === generation) receive(JSON.parse(body));
     } catch (_) {
-      // An interrupted web restart must not replay or extend an old notice.
+      // Keep the current card through a brief interruption; fresh messages replace it.
     } finally {
       if (controller === request) {
         clearTimeout(requestTimer); requestTimer = 0;
@@ -171,6 +195,7 @@
     clearTimeout(pollTimer); clearTimeout(requestTimer);
     pollTimer = requestTimer = 0;
     if (controller) { controller.abort(); controller = null; }
+    pendingMessage = null;
     hide(true);
   }
   function visibilityChanged() {
