@@ -76,20 +76,11 @@ export function onReady() {
     const id = button.attr('id') || '';
     const direction = button.hasClass('vote-up') ? 'up' : 'down';
 
-    return direction + ':' + key + ':' + id;
+    return direction + ':' + String(button.closest('[data-occurrence-id]').attr('data-occurrence-id') || '') + ':' + key + ':' + id;
   }
 
   function markActivationHandled(event, buttonElement) {
     const originalEvent = event;
-
-    if (
-      event.type === 'pointerup' &&
-      event instanceof PointerEvent &&
-      event.pointerType === 'mouse' &&
-      event.button !== 0
-    ) {
-      return false;
-    }
 
     const now = Date.now();
     const signature = activationSignature(buttonElement);
@@ -208,19 +199,12 @@ export function onReady() {
     handleVotePress(buttonElement);
   }
 
+  // Native buttons synthesize one click after a completed tap/keyboard action.
+  // A swipe cancelled by native scrolling must never become a vote on touchend.
   document.addEventListener('keydown', event => {
-    if (event.key === 'Enter' || event.key === ' ') handleVoteActivation(event);
+    if ((event.key === 'Enter' || event.key === ' ') &&
+        !(findVoteButton(event) instanceof HTMLButtonElement)) handleVoteActivation(event);
   }, {capture: true});
-
-  document.addEventListener('pointerup', handleVoteActivation, {
-    capture: true,
-    passive: false,
-  });
-
-  document.addEventListener('touchend', handleVoteActivation, {
-    capture: true,
-    passive: false,
-  });
 
   document.addEventListener('click', handleVoteActivation, {
     capture: true,
