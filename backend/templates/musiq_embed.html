@@ -1542,22 +1542,6 @@
     .ui-autocomplete { max-height: min(240px, 32vh); overflow-y: auto; }
     @media (max-width: 620px) { #current-song-card { margin-left: -6px; margin-right: -6px; } }
     @media (max-height: 420px) { #music-input-card .clearable { min-height: 40px; } #current-song { padding-top: 10px !important; padding-bottom: 10px !important; grid-template-rows: minmax(50px, auto) auto; } #current-song .current-song-artwork { width: 50px; height: 50px; flex-basis: 50px; } #furatic-closing-banner.is-visible { max-height: min(120px, 28vh); } #auto-queue-dock { flex-basis: 82px; min-height: 82px; } .auto-queue-thumbnail { height: 34px; } #current-song.present { min-height: 120px; } }
-    /* Vote surfaces do not need their own backdrop-blur layer. */
-    #song-queue > .list-group-item,
-    #history-song-queue > .list-group-item,
-    #auto-song-queue > .list-group-item,
-    #current-song {
-        --furatic-panel: var(--furatic-card-color, rgb(9, 13, 25));
-        -webkit-backdrop-filter: none;
-        backdrop-filter: none;
-    }
-    #song-queue > .list-group-item,
-    #history-song-queue > .list-group-item,
-    #auto-song-queue > .list-group-item,
-    #current-song {
-        transition: background-color var(--furatic-card-tint-time, 450ms) linear, box-shadow 240ms ease,
-          transform 240ms ease, opacity 220ms ease, filter 220ms ease;
-    }
     #history-song-queue > .furatic-owned-song .queue-entry { padding-right: 0 !important; }
 
     /* Match the parent's transparent 20px gutters without widening its surface
