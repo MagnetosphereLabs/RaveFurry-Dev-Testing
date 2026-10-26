@@ -28,7 +28,8 @@ _worker_lock = threading.Lock()
 _stop = threading.Event()
 EMPTY_QUEUE_LINES = ["Queue empty", "Add music using our website: furatic.xyz"]
 OBS_NAME_REFERENCE = "Queue empty, add music using our website, furatic.xyz"
-OBS_NAME_LIMIT = len(OBS_NAME_REFERENCE)
+OBS_NAME_SCALE = 0.85
+OBS_NAME_LIMIT = int(len(OBS_NAME_REFERENCE) * OBS_NAME_SCALE)
 _OBS_BRACKETS = re.compile(r"\(([^()]*)\)|\[([^\[\]]*)\]")
 _OBS_ANNOTATION = re.compile(
     r"^(?:official\b|unofficial\b|music video\b|lyrics?\b|audio\b|video\b|"
@@ -98,7 +99,7 @@ def _obs_name_line(value: str) -> str:
         return match.group(0)
 
     value = _obs_text(_OBS_BRACKETS.sub(unique_qualifier, value))
-    budget = _obs_text_width(OBS_NAME_REFERENCE)
+    budget = _obs_text_width(OBS_NAME_REFERENCE) * OBS_NAME_SCALE
 
     def fits(text):
         return len(text) <= OBS_NAME_LIMIT and _obs_text_width(text) <= budget
