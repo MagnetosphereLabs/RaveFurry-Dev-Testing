@@ -474,6 +474,7 @@ class Playback:
         trim_tail = effective_duration < (original_duration - 0.25)
         transition_fade_seconds = audio_tail.transition_fade_seconds() if trim_tail else 0.0
         fade_started = False
+        last_tail_check = time.monotonic()
 
         if trim_tail:
             logging.info(
@@ -507,6 +508,13 @@ class Playback:
             else:
                 progress = (timezone.now() - current_song.created).total_seconds()
 
+                # A cache miss schedules optional analysis off-thread. Pick up
+                # its result without delaying the initial playback handoff.
+                if not fade_started and time.monotonic() - last_tail_check >= 1:
+                    last_tail_check = time.monotonic()
+                    effective_duration = audio_tail.effective_duration_for_song(starting_song)
+                    trim_tail = effective_duration < (original_duration - 0.25)
+                    transition_fade_seconds = audio_tail.transition_fade_seconds() if trim_tail else 0.0
                 if trim_tail and not fade_started:
                     fade_start = max(0.0, effective_duration - transition_fade_seconds)
                     if progress >= fade_start:
@@ -784,4 +792,5 @@ def stop() -> None:
     redis.put("stop_playback_loop", True)
     obs_export.stop()
     queue_changed.set()
+
 
