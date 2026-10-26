@@ -118,19 +118,49 @@ export function onReady() {
     return keyOfElement(button);
   }
 
+  // A slow/reconnecting phone can render the shared queue before its personal
+  // vote snapshot arrives. Preserve that tap, share one bounded read, then use
+  // the server's choice/revision. Never assume an unknown choice is zero.
+  let personalRead: Promise<void> | null = null;
+  const awaitingState = new Set<string>();
+  function loadPersonalVotes(): Promise<void> {
+    if (personalRead) return personalRead;
+    const endpoint = urls['musiq']['own-song-state'];
+    if (!endpoint) return Promise.reject(new Error('Voting is reconnecting. Please try again.'));
+    const abort = new AbortController();
+    const timeout = window.setTimeout(() => abort.abort(), 9000);
+    personalRead = (async () => {
+      const response = await fetch(endpoint, {credentials: 'same-origin', cache: 'no-store', signal: abort.signal});
+      if (!response.ok) throw new Error('Voting is reconnecting. Please try again.');
+      const result = await response.json();
+      if (!Array.isArray(result.myVotes)) throw new Error('Voting is reconnecting. Please try again.');
+      document.dispatchEvent(new CustomEvent('furatic:personal-votes', {detail: result.myVotes}));
+    })().finally(() => { window.clearTimeout(timeout); personalRead = null; });
+    return personalRead;
+  }
+
   async function handleVotePress(buttonElement) {
     const button = $(buttonElement);
     const row = button.closest('[data-occurrence-id]');
     const occurrence = row.attr('data-occurrence-id');
-    const previous = getVoteState(occurrence);
-    if (button.attr('data-furatic-own-vote-blocked') === 'true' ||
-        row.attr('data-priority-tier') === 'extra' ||
-        row.attr('data-history-pending') === 'true' || previous?.eligible === false ||
-        button.attr('data-vote-pending') === 'true') return false;
+    if (!occurrence || buttonElement.closest('[inert]')) return false;
+    const blocked = () => button.attr('data-furatic-own-vote-blocked') === 'true' ||
+      row.attr('data-priority-tier') === 'extra' || row.attr('data-history-pending') === 'true' ||
+      button.attr('data-vote-pending') === 'true';
+    if (blocked() || awaitingState.has(occurrence)) return false;
+    let previous = getVoteState(occurrence);
     if (!previous) {
-      document.dispatchEvent(new CustomEvent('furatic:refresh-personal-votes'));
-      return false;
+      awaitingState.add(occurrence);
+      try { await loadPersonalVotes(); }
+      catch (_error) { errorToast('Voting is reconnecting. Please try again.'); return false; }
+      finally { awaitingState.delete(occurrence); }
+      // Do not transfer an old tap to a different song after a playing handoff.
+      if (!buttonElement.isConnected || row.attr('data-occurrence-id') !== occurrence ||
+          document.hidden || buttonElement.closest('[inert]')) return false;
+      previous = getVoteState(occurrence);
+      if (!previous) { errorToast('This song has changed. Please try your vote again.'); return false; }
     }
+    if (blocked() || previous.eligible === false) return false;
     const key = resolveVoteKey(button);
     if (key === -1 || !canVote()) return false;
     const direction = button.hasClass('vote-up') ? 1 : -1;
@@ -199,14 +229,84 @@ export function onReady() {
     handleVotePress(buttonElement);
   }
 
-  // Native buttons synthesize one click after a completed tap/keyboard action.
-  // A swipe cancelled by native scrolling must never become a vote on touchend.
+  // Touch completion is explicit: some mobile engines suppress the later
+  // compatibility click after hover/content changes. Do not cancel touchstart
+  // or touchmove: the browser must keep native scrolling and pinch zoom.
+  type Tap = {id: number, button: Element, signature: string, x: number, y: number, began: number};
+  let tap: Tap | null = null;
+  let completedTouch = '', suppressClickUntil = 0;
+  function cancelTap() {
+    if (tap) {
+      completedTouch = tap.signature;
+      suppressClickUntil = Date.now() + 1000;
+    }
+    tap = null;
+  }
+  function beginTap(id: number, x: number, y: number, event: Event) {
+    cancelTap();
+    const button = findVoteButton(event);
+    if (!button || button.closest('[inert]') || button.hasAttribute('disabled') ||
+        button.getAttribute('data-furatic-own-vote-blocked') === 'true') return;
+    tap = {id, button, signature: activationSignature(button), x, y, began: Date.now()};
+  }
+  function moveTap(id: number, x: number, y: number) {
+    if (tap?.id === id && Math.hypot(x - tap.x, y - tap.y) > 12) cancelTap();
+  }
+  function finishTap(id: number, x: number, y: number, event: Event) {
+    const candidate = tap;
+    if (!candidate || candidate.id !== id) return;
+    cancelTap();
+    if (Date.now() - candidate.began > 900 || Math.hypot(x - candidate.x, y - candidate.y) > 12 ||
+        !candidate.button.isConnected || activationSignature(candidate.button) !== candidate.signature ||
+        document.elementFromPoint(x, y)?.closest('.vote-up, .vote-down') !== candidate.button) return;
+    if (markActivationHandled(event, candidate.button)) handleVotePress(candidate.button);
+  }
+  if (typeof window.PointerEvent === 'function') {
+    document.addEventListener('pointerdown', event => {
+      if (event.pointerType !== 'touch') return;
+      if (!event.isPrimary) { cancelTap(); return; }
+      beginTap(event.pointerId, event.clientX, event.clientY, event);
+    }, {capture: true, passive: true});
+    document.addEventListener('pointermove', event => moveTap(event.pointerId, event.clientX, event.clientY), {capture: true, passive: true});
+    document.addEventListener('pointerup', event => finishTap(event.pointerId, event.clientX, event.clientY, event), {capture: true, passive: false});
+    document.addEventListener('pointercancel', cancelTap, {capture: true, passive: true});
+  } else {
+    // Older touch browsers use this branch exclusively, never in addition to pointers.
+    document.addEventListener('touchstart', event => {
+      if (event.touches.length !== 1) { cancelTap(); return; }
+      const touch = event.changedTouches[0];
+      beginTap(touch.identifier, touch.clientX, touch.clientY, event);
+    }, {capture: true, passive: true});
+    document.addEventListener('touchmove', event => {
+      for (const touch of Array.from(event.changedTouches)) moveTap(touch.identifier, touch.clientX, touch.clientY);
+    }, {capture: true, passive: true});
+    document.addEventListener('touchend', event => {
+      if (event.touches.length) { cancelTap(); return; }
+      const touch = event.changedTouches[0];
+      finishTap(touch.identifier, touch.clientX, touch.clientY, event);
+    }, {capture: true, passive: false});
+    document.addEventListener('touchcancel', cancelTap, {capture: true, passive: true});
+  }
+  document.addEventListener('scroll', cancelTap, {capture: true, passive: true});
+  document.addEventListener('visibilitychange', cancelTap);
+  window.addEventListener('pagehide', cancelTap);
+
+  // Desktop, keyboard and assistive activation retain the ordinary click path.
   document.addEventListener('keydown', event => {
     if ((event.key === 'Enter' || event.key === ' ') &&
         !(findVoteButton(event) instanceof HTMLButtonElement)) handleVoteActivation(event);
   }, {capture: true});
 
-  document.addEventListener('click', handleVoteActivation, {
+  document.addEventListener('click', event => {
+    const button = findVoteButton(event);
+    // A real tap and its delayed generated click are one action, including when
+    // a fast POST finishes before the browser dispatches that generated click.
+    if (button && event.detail !== 0 && Date.now() < suppressClickUntil &&
+        activationSignature(button) === completedTouch) {
+      event.preventDefault(); event.stopImmediatePropagation(); return;
+    }
+    handleVoteActivation(event);
+  }, {
     capture: true,
     passive: false,
   });
