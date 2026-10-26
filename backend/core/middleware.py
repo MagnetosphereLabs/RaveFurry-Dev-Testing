@@ -1,5 +1,5 @@
 """Runtime-only FURATIC middleware for bans, IP screening, and After Hours gating."""
-from django.http import HttpResponse
+from django.http import HttpResponse, JsonResponse
 from django.shortcuts import redirect
 import logging
 import os
@@ -107,30 +107,38 @@ class DatabaseConnectionCleanupMiddleware:
                         return HttpResponse(
                             "recovery deferred while media is active", content_type="text/plain"
                         )
-                return HttpResponse(
-                    recovery_reason, status=503, content_type="text/plain"
-                )
+                response = HttpResponse(recovery_reason, status=503, content_type="text/plain")
+                if recovery_reason == "playback worker failed":
+                    response["X-Furatic-Recovery"] = "playback-worker-failed"
+                return response
             return HttpResponse("ok", content_type="text/plain")
 
-        with _DATABASE_REQUEST_SLOTS:
+        # Bound the admission wait. Waiting indefinitely can consume every
+        # Waitress thread, including the one needed to answer health checks.
+        if not _DATABASE_REQUEST_SLOTS.acquire(timeout=2.0):
+            response = HttpResponse("The server is busy. Please retry shortly.", status=503)
+            response["Retry-After"] = "1"
+            return response
+        try:
             close_old_connections()
+            return self.get_response(request)
+        finally:
             try:
-                return self.get_response(request)
-            except (OperationalError, DatabaseError) as error:
-                logger.warning(
-                    "database unavailable while handling %s %s: %s",
-                    request.method,
-                    request.get_full_path(),
-                    error,
-                )
                 connections.close_all()
-                return HttpResponse(
-                    "FURATIC is recovering its local database connection. Please retry shortly.",
-                    status=503,
-                    content_type="text/plain",
-                )
             finally:
-                connections.close_all()
+                _DATABASE_REQUEST_SLOTS.release()
+
+    def process_exception(self, request, exception):
+        # Django converts view exceptions to responses before outer __call__
+        # handlers run; this is the correct hook for recoverable DB failures.
+        if isinstance(exception, (OperationalError, DatabaseError)):
+            logger.warning("database unavailable while handling %s %s: %s",
+                           request.method, request.path, exception)
+            connections.close_all()
+            response = HttpResponse("FURATIC is recovering its local database connection. Please retry shortly.", status=503)
+            response["Retry-After"] = "1"
+            return response
+        return None
 
 class ClientIpBanMiddleware:
     """Resolve the real client IP, log requests, and block banned traffic."""
@@ -144,7 +152,8 @@ class ClientIpBanMiddleware:
         # Public rendering snapshots do not need a database identity lookup.
         # Keep all IP screening and resolve identity for blocked/audited requests.
         features_only = request.method == "GET" and path == "/visualizer/features.json"
-        identity = None if features_only else user_manager.client_identity(request)
+        lightweight = features_only or path in {"/api/site-mode/", "/visualizer/features/"}
+        identity = None if lightweight else user_manager.client_identity(request)
         screening = None
 
         if request.client_ip and user_manager.is_banned_ip(request.client_ip):
@@ -192,7 +201,13 @@ class ClientIpBanMiddleware:
 
         # Avoid thousands of console/file writes for successful background polls.
         # All failures, bans, and ordinary site requests retain their existing logs.
-        if not features_only or response.status_code != 200:
+        quiet_poll = path in {
+            "/visualizer/features.json", "/api/site-mode/", "/api/notifications/",
+            "/ajax/musiq/state/", "/ajax/musiq/own-song-state/",
+            "/ajax/musiq/played-history/", "/api/moderator/state/",
+            "/afterhours/top-songs/", "/afterhours/history/",
+        }
+        if not quiet_poll or response.status_code >= 400:
             logger.info(
                 "HTTP %s %s %s [%s]",
                 request.method,
@@ -214,11 +229,20 @@ class AfterHoursModeMiddleware:
 
         if site_mode.is_afterhours() and not path.startswith(_ALLOWED_PREFIXES):
             if path.startswith("/ajax/") or path.startswith("/api/"):
-                return HttpResponse(
-                    "FURATIC is currently in After Hours mode.",
-                    status=503,
-                )
+                response = JsonResponse({
+                    "siteMode": "afterhours", "redirect": "/afterhours/",
+                    "message": "The event has ended. Opening After Hours.",
+                    "notifications": [], "songs": [], "myVotes": {}, "currentSongQueueKey": None,
+                    "musiq": {"currentSong": None, "songQueue": [], "autoQueue": [],
+                              "siteMode": "afterhours", "progress": 0, "totalTimeFormatted": "00:00"},
+                }, status=200 if request.method in {"GET", "HEAD"} else 409)
+                response["X-Furatic-Site-Mode"] = "afterhours"
+                response["Cache-Control"] = "no-store"
+                # An expected mode transition is handled, not a server incident.
+                response._has_been_logged = True
+                return response
             return redirect("afterhours")
 
         return self.get_response(request)
+
 
