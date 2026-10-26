@@ -65,7 +65,7 @@ export function infoToast(firstLine, secondLine?, duration = toastTimeout) {
   $('#info-toast').find('.toast-content').text(firstLine);
   if (secondLine != null) {
     $('#info-toast').find('.toast-content').append($('<br/>'));
-    $('#info-toast').find('.toast-content').append(secondLine);
+    $('#info-toast').find('.toast-content').append(document.createTextNode(String(secondLine)));
   }
   $('#success-toast').fadeOut();
   $('#warning-toast').fadeOut();
@@ -88,7 +88,7 @@ export function successToast(firstLine, secondLine?) {
   $('#success-toast').find('.toast-content').text(firstLine);
   if (secondLine != null) {
     $('#success-toast').find('.toast-content').append($('<br/>'));
-    $('#success-toast').find('.toast-content').append(secondLine);
+    $('#success-toast').find('.toast-content').append(document.createTextNode(String(secondLine)));
   }
   $('#info-toast').fadeOut();
   $('#warning-toast').fadeOut();
@@ -115,7 +115,7 @@ export function warningToast(firstLine, secondLine?, showBar?) {
   $('#warning-toast').find('.toast-content').text(firstLine);
   if (secondLine != null) {
     $('#warning-toast').find('.toast-content').append($('<br/>'));
-    $('#warning-toast').find('.toast-content').append(secondLine);
+    $('#warning-toast').find('.toast-content').append(document.createTextNode(String(secondLine)));
   }
   $('#info-toast').fadeOut();
   $('#success-toast').fadeOut();
@@ -146,7 +146,7 @@ export function errorToast(firstLine, secondLine?) {
   $('#error-toast').find('.toast-content').text(firstLine);
   if (secondLine != null) {
     $('#error-toast').find('.toast-content').append($('<br/>'));
-    $('#error-toast').find('.toast-content').append(secondLine);
+    $('#error-toast').find('.toast-content').append(document.createTextNode(String(secondLine)));
   }
   $('#info-toast').fadeOut();
   $('#success-toast').fadeOut();
@@ -208,7 +208,21 @@ export function registerSpecificState(f) {
 /** This function is called everytime a new state is received from the server.
  * @param {Object} newState the state that was received
  */
+let navigatingToAfterHours = false;
+
+/** Expected event shutdown is a navigation, never a failed-server banner. */
+export function handleModeTransition(data): boolean {
+  if (data?.siteMode !== 'afterhours' || data?.redirect !== '/afterhours/') return false;
+  if (!navigatingToAfterHours) {
+    navigatingToAfterHours = true;
+    try { (window.top || window).location.replace('/afterhours/'); }
+    catch (_error) { window.location.replace('/afterhours/'); }
+  }
+  return true;
+}
+
 export function updateState(newState) {
+  if (handleModeTransition(newState)) return;
   updateBaseState(newState);
 
   for (const specificState of specificStates) {
@@ -628,3 +642,4 @@ export function onReady() {
 }
 
 $(document).ready(onReady);
+
