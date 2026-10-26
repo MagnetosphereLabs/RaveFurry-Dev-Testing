@@ -75,7 +75,7 @@ def retry_file_operation(
             if attempt >= attempts:
                 break
 
-            active_logger.warning(
+            active_logger.debug(
                 "%s failed because the file appears temporarily locked "
                 "(attempt %s/%s): %s",
                 description,
@@ -172,3 +172,29 @@ def safe_unlink(
         attempts=attempts,
         logger=logger,
     )
+
+
+
+class OptionalFileStatus:
+    """Report a persistent output failure once, while retrying fresh state."""
+    def __init__(self, name, logger):
+        self.name, self.logger = name, logger
+        self.first_failure = None
+        self.last_report = -float("inf")
+        self.reported = False
+
+    def failed(self, error):
+        now = time.monotonic()
+        if self.first_failure is None:
+            self.first_failure = now
+        persistent = now - self.first_failure >= 10
+        if (persistent or not is_transient_file_error(error)) and now - self.last_report >= 60:
+            self.logger.warning("%s unavailable; fresh-state retry continues: %s", self.name, error)
+            self.last_report, self.reported = now, True
+        else:
+            self.logger.debug("%s update deferred: %s", self.name, error)
+
+    def succeeded(self):
+        if self.reported:
+            self.logger.info("%s updates recovered", self.name)
+        self.first_failure, self.last_report, self.reported = None, -float("inf"), False
