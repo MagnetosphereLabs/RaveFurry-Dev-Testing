@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-furatic-transport="auto">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -544,7 +544,7 @@ canvas{display:block;width:100%;height:100%}
     values[index]=Number.isFinite(maxSpeed)||Number.isFinite(maxAcceleration)?current+(velocity+boundedVelocity)*.5*dt:next;
     velocities[index]=boundedVelocity;
   }
-  let sharedScene=null,sharedAt=-Infinity,pollTimer=0,pollAbort=null,usingPoll=false,readySent=false;
+  let sharedSequence=null,sharedScene=null,sharedAt=-Infinity,pollTimer=0,pollAbort=null,usingPoll=document.documentElement.dataset.furaticTransport==='poll',readySent=false;
   const localScene={motion,clouds,material,dance,thumps,bass:bassVisual,music:renderMusic,energy:renderEnergy,sizes:renderSizes,bands:renderBands,lights:lightEnergy,edgeEnergy,edgeLights,edgeMusic,edgeBands};
   const displayedScene={},displayedVelocity={};
   let displayedReady=false;
@@ -558,8 +558,12 @@ canvas{display:block;width:100%;height:100%}
     if(!data||typeof data!=='object')return;
     const lengths={motion:4,clouds:16,material:16,dance:4,thumps:4,bass:2,music:4,energy:4,sizes:4,bands:48,lights:4,edgeEnergy:4,edgeLights:4,edgeMusic:4,edgeBands:48};
     const shared=data.scene?.uniforms;
-    if(shared&&Object.keys(lengths).every(key=>Array.isArray(shared[key])&&shared[key].length===lengths[key]&&shared[key].every(Number.isFinite))){sharedScene=shared;sharedAt=performance.now()/1000;}
-    else sharedScene=null;
+    if(shared&&Object.keys(lengths).every(key=>Array.isArray(shared[key])&&shared[key].length===lengths[key]&&shared[key].every(Number.isFinite))){
+      // Keep one last good scene across brief network jitter. Repeated cached
+      // packets do not renew its age; a stopped publisher still expires.
+      if(data.scene.sequence!==sharedSequence){sharedAt=performance.now()/1000;sharedSequence=data.scene.sequence;}
+      sharedScene=shared;
+    }
 
     if(data.version!==1||!Array.isArray(data.bands)||data.bands.length!==48||!data.bands.every(Number.isFinite))return;
     const values=[data.level,data.bass,data.mid,data.treble,data.activity,data.serverTime,data.kickAt,data.accentAt,data.kickId,data.accentId,data.kick,data.accent];
@@ -632,7 +636,7 @@ canvas{display:block;width:100%;height:100%}
     const controller=new AbortController();pollAbort=controller;
     const timeout=setTimeout(()=>controller.abort(),2000);
     try{const response=await fetch('/visualizer/features.json',{cache:'no-store',credentials:'same-origin',signal:controller.signal});if(response.ok)receive(await response.text());}
-    catch(_error){}finally{clearTimeout(timeout);if(pollAbort===controller)pollAbort=null;if(!stopped&&visible&&usingPoll)pollTimer=setTimeout(pollFeatures,20);}
+    catch(_error){}finally{clearTimeout(timeout);if(pollAbort===controller)pollAbort=null;if(!stopped&&visible&&usingPoll)pollTimer=setTimeout(pollFeatures,50);}
   }
   function connect(){
     if(stopped||!visible||simulated)return;
@@ -1131,7 +1135,7 @@ canvas{display:block;width:100%;height:100%}
     if(socket&&now-Math.max(lastReceived,connectionOpened)>3){socket.close();}
   }
   function render(dt){
-    const shared=sharedScene&&performance.now()/1000-sharedAt<.45?sharedScene:null;
+    const shared=sharedScene&&performance.now()/1000-sharedAt<1.5?sharedScene:null;
     // Retarget the last displayed scene, including its velocity. First contact,
     // sparse packets, fallback and tab resume all use the same continuous path.
     for(const [name,local] of Object.entries(localScene)){
@@ -1169,7 +1173,7 @@ canvas{display:block;width:100%;height:100%}
     if(showing===visible||stopped)return;visible=showing;
     cancelAnimationFrame(raf);raf=0;lastFrame=0;nextRender=0;
     if(!visible){
-      clearTimeout(pollTimer);pollTimer=0;pollAbort?.abort();sharedScene=null;
+      clearTimeout(pollTimer);pollTimer=0;pollAbort?.abort();sharedScene=null;sharedSequence=null;
       clearTimeout(reconnectTimer);reconnectTimer=0;
       if(socket){socket.onclose=null;socket.onmessage=null;socket.close();socket=null;}
       lastIds=null;lastCloudIds=null;lastReceived=-Infinity;amplitudeReady=false;
@@ -1197,3 +1201,4 @@ canvas{display:block;width:100%;height:100%}
 </script>
 </body>
 </html>
+
