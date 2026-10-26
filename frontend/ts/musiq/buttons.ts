@@ -1,6 +1,6 @@
 import {state} from './update';
 import {
-  localStorageGet,
+  localStorageGet, handleModeTransition,
   infoToast, successToast, warningToast, errorToast,
 } from '../base';
 
@@ -38,7 +38,7 @@ export function reconcileDownloadNotifications() {
 }
 
 async function pollDownloadNotifications() {
-  if (notificationPollRunning) return;
+  if (notificationPollRunning || document.hidden || pendingDownloads.size === 0) return;
   notificationPollRunning = true;
   const abort = new AbortController();
   const timeout = window.setTimeout(() => abort.abort(), 9000);
@@ -46,6 +46,7 @@ async function pollDownloadNotifications() {
     const response = await fetch('/api/notifications/?after=' + notificationCursor, {credentials: 'same-origin', cache: 'no-store', signal: abort.signal});
     if (!response.ok) return;
     const result = await response.json();
+    if (handleModeTransition(result)) return;
     notificationCursor = Math.max(notificationCursor, Number(result.latest || 0));
     for (const item of result.notifications || []) {
       if (!String(item.kind).startsWith('song_request_') || item.createdAt < notificationStartedAt) continue;
@@ -145,6 +146,7 @@ export function requestArchivedMusic(key, query,
       }).done(function(response) {
     requestAccepted(response, query);
   }).fail(function(response) {
+    if (handleModeTransition(response.responseJSON)) return;
     errorToast(response.responseText, '"' + query + '"');
   });
   $('#music-input').val('').trigger('change');
@@ -170,6 +172,7 @@ export function requestNewMusic(query, platform = localStorageGet('platform')) {
       }).done(function(response) {
     requestAccepted(response, query);
   }).fail(function(response) {
+    if (handleModeTransition(response.responseJSON)) return;
     errorToast(response.responseText, '"' + query + '"');
   }).always(function() {
     musicRequestInFlight = false;
@@ -361,3 +364,4 @@ $(document).ready(() => {
   }
   onReady();
 });
+
