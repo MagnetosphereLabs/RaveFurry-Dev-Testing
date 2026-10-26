@@ -32,6 +32,7 @@ from core.authentication import ModeratorAuthenticationForm
 
 urlpatterns: List[Union[URLPattern, URLResolver]] = [
     path("visualizer/background/", visualizer.background, name="visualizer-background"),
+    path("visualizer/features/", visualizer.transport, name="visualizer-transport"),
     path("visualizer/features.json", visualizer.features, name="visualizer-features"),
     path("", base.landing, name="base"),
     path("afterhours/", base.afterhours, name="afterhours"),
@@ -210,3 +211,4 @@ urlpatterns.append(
         ),
     )
 )
+
