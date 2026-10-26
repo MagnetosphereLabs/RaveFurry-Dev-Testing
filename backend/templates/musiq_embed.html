@@ -1542,6 +1542,24 @@
     .ui-autocomplete { max-height: min(240px, 32vh); overflow-y: auto; }
     @media (max-width: 620px) { #current-song-card { margin-left: -6px; margin-right: -6px; } }
     @media (max-height: 420px) { #music-input-card .clearable { min-height: 40px; } #current-song { padding-top: 10px !important; padding-bottom: 10px !important; grid-template-rows: minmax(50px, auto) auto; } #current-song .current-song-artwork { width: 50px; height: 50px; flex-basis: 50px; } #furatic-closing-banner.is-visible { max-height: min(120px, 28vh); } #auto-queue-dock { flex-basis: 82px; min-height: 82px; } .auto-queue-thumbnail { height: 34px; } #current-song.present { min-height: 120px; } }
+    /* Vote surfaces do not need their own backdrop-blur layer. */
+    #song-queue > .list-group-item,
+    #history-song-queue > .list-group-item,
+    #auto-song-queue > .list-group-item,
+    #current-song {
+        --furatic-panel: var(--furatic-card-color, rgb(9, 13, 25));
+        -webkit-backdrop-filter: none;
+        backdrop-filter: none;
+    }
+    #song-queue > .list-group-item,
+    #history-song-queue > .list-group-item,
+    #auto-song-queue > .list-group-item,
+    #current-song {
+        transition: background-color var(--furatic-card-tint-time, 450ms) linear, box-shadow 240ms ease,
+          transform 240ms ease, opacity 220ms ease, filter 220ms ease;
+    }
+    #history-song-queue > .furatic-owned-song .queue-entry { padding-right: 0 !important; }
+
     /* Match the parent's transparent 20px gutters without widening its surface
        or moving Search, the ordinary queue and Auto Queue from their old edges. */
     html.furatic-framed .furatic-embed-shell { padding-left: 30px; padding-right: 30px; }
@@ -1726,9 +1744,9 @@
             </div>
             <div id="song-votes">
                 <div class="current-song-vote-indicators" id="current-song-upvote-indicators"></div>
-                <i class="fas fa-chevron-circle-up vote-up" id="current-song-vote-up" role="button" tabindex="0" aria-label="Upvote current song"></i>
+                <button type="button" class="fas fa-chevron-circle-up vote-up" id="current-song-vote-up" aria-label="Upvote current song"></button>
                 <span id="current-song-votes"></span>
-                <i class="fas fa-chevron-circle-down vote-down" id="current-song-vote-down" role="button" tabindex="0" aria-label="Downvote current song"></i>
+                <button type="button" class="fas fa-chevron-circle-down vote-down" id="current-song-vote-down" aria-label="Downvote current song"></button>
                 <div class="current-song-vote-indicators" id="current-song-downvote-indicators"></div>
             </div>
         </li>
@@ -2332,7 +2350,16 @@
             element.style.setProperty("--furatic-" + cssPrefix + "-y", clampedY.toFixed(2) + "%");
         }
     
-        ownedElements.forEach(function (element) {
+        // History can contain fifty rows. Animate only visible owned cards,
+        // measuring them before writing any of the existing orb properties.
+        const visibleOwnedElements = Array.from(ownedElements).filter(function (element) {
+            const rect = element.getBoundingClientRect();
+            const scroll = element.closest(".furatic-list-scroll");
+            const clip = scroll ? scroll.getBoundingClientRect() : {top: 0, bottom: window.innerHeight};
+            return rect.width > 0 && rect.bottom > Math.max(0, clip.top) &&
+                rect.top < Math.min(window.innerHeight, clip.bottom);
+        });
+        visibleOwnedElements.forEach(function (element) {
             updateOrb(element, "furaticOrb1", "orb-1", {
                 minX: 10,
                 maxX: 48,
@@ -2487,6 +2514,14 @@
                 ensureOwnedOrbSeed(row, key);
                 ensureRemoveButton(row, key);
             }
+        });
+
+        document.querySelectorAll("#history-song-queue > li:not(.furatic-queue-exit)").forEach(function (row) {
+            const isOwned = row.dataset.furaticOwnHistory === "true";
+            row.classList.toggle("furatic-owned-song", isOwned);
+            syncBlockedVoteButtons(row, isOwned);
+            row.querySelector(".own-song-remove")?.remove();
+            if (isOwned) ensureOwnedOrbSeed(row, row.dataset.ownershipSeed || row.dataset.historyId);
         });
 
         const currentSongRow = getCurrentSongRow();
@@ -2682,6 +2717,8 @@
         scheduleDecorate();
     });
 
+    const historyQueue = document.getElementById("history-song-queue");
+    if (historyQueue) observer.observe(historyQueue, {childList: true});
     const songQueue = document.getElementById("song-queue");
     const currentSongRow = document.getElementById("current-song");
 
@@ -2707,6 +2744,7 @@
     ensureOwnedOrbAnimation();
     if (!window.FURATIC_TUTORIAL_PLAYER) window.setInterval(refreshOwnSongState, OWN_SONG_POLL_MS);
     document.addEventListener("furatic:refresh-personal-votes", refreshOwnSongState);
+    document.addEventListener("furatic:history-ownership-change", scheduleDecorate);
 
     if (window.jQuery) {
         window.jQuery("#current-song-title").on("change", scheduleDecorate);
