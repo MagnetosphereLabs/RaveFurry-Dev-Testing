@@ -6,6 +6,8 @@ import datetime
 import subprocess
 import re
 import uuid
+import threading
+import time
 from functools import wraps
 from typing import Callable
 
@@ -24,6 +26,65 @@ from core.settings import storage
 from core.util import extract_value
 
 SEEK_DISTANCE = 10
+_poll_rows = {}
+_poll_rows_lock = threading.RLock()
+_poll_rows_build = {"active": threading.Lock(), "history": threading.Lock()}
+
+
+class _PollSnapshotBusy(Exception):
+    """A shared read is still running; let this HTTP worker serve other work."""
+
+
+def _poll_busy_response():
+    response = JsonResponse({"message": "Song update is still in progress. Please retry shortly."}, status=503)
+    response["Retry-After"] = "1"
+    response["Cache-Control"] = "private, no-store"
+    return response
+
+
+def _poll_snapshot(key, loader):
+    """Share read-only song rows, never request-specific vote or ownership responses.
+
+    There are exactly two entries (active songs and history). Queue updates
+    invalidate both via the state generation, including history-only votes.
+    Ordinary reuse is 200ms; a refresh in progress may retain a complete view
+    for up to two seconds. Personal revisions always come from the database.
+    """
+    from core import state_handler
+    generation = state_handler.snapshot_generation()
+    with _poll_rows_lock:
+        cached = _poll_rows.get(key)
+        if cached and cached[0] == generation and time.monotonic() - cached[1] < .2:
+            return cached[2]
+    # Independent bounded reads: a history refresh must not hold up ownership
+    # of the current queue (or vice versa).
+    build_lock = _poll_rows_build[key]
+    acquired = build_lock.acquire(blocking=False)
+    if not acquired:
+        with _poll_rows_lock:
+            cached = _poll_rows.get(key)
+            if cached and cached[0] == generation and time.monotonic() - cached[1] < 2:
+                return cached[2]
+        if not build_lock.acquire(timeout=1):
+            raise _PollSnapshotBusy()
+    try:
+        generation = state_handler.snapshot_generation()
+        with _poll_rows_lock:
+            cached = _poll_rows.get(key)
+            if cached and cached[0] == generation and time.monotonic() - cached[1] < .2:
+                return cached[2]
+        rows = loader()
+        if generation == state_handler.snapshot_generation():
+            with _poll_rows_lock:
+                _poll_rows[key] = (generation, time.monotonic(), rows)
+        return rows
+    finally:
+        build_lock.release()
+
+
+def _poll_history():
+    from core import played_history
+    return _poll_snapshot("history", lambda: list(played_history.recent()))
 
 
 def control(func: Callable) -> Callable:
@@ -368,8 +429,14 @@ def own_song_state(request: WSGIRequest) -> HttpResponse:
     songs = []
     
     active_queue_key = user_manager.get_active_queue_slot(request_ip)
+    try:
+        active_queue, current_song = _poll_snapshot("active", lambda: (
+            list(musiq.ordered_queue_queryset()), models.CurrentSong.objects.first()))
+        history_rows = _poll_history()
+    except _PollSnapshotBusy:
+        return _poll_busy_response()
     
-    for position, song in enumerate(musiq.ordered_queue_queryset(), start=1):
+    for position, song in enumerate(active_queue, start=1):
         owns_song = False
     
         if active_queue_key is not None and song.id == active_queue_key:
@@ -396,7 +463,6 @@ def own_song_state(request: WSGIRequest) -> HttpResponse:
             )
 
     current_song_queue_key = None
-    current_song = models.CurrentSong.objects.first()
     if (
         current_song
         and (
@@ -417,11 +483,10 @@ def own_song_state(request: WSGIRequest) -> HttpResponse:
         current_song_queue_key = current_song.queue_key
 
     from core import voting
-    active_songs = list(musiq.ordered_queue_queryset())
+    active_songs = list(active_queue)
     if current_song:
         active_songs.append(current_song)
-    from core import played_history
-    active_songs.extend(played_history.recent())
+    active_songs.extend(history_rows)
     response = JsonResponse({
         "songs": songs,
         "currentSongQueueKey": current_song_queue_key,
@@ -502,14 +567,22 @@ def vote(request: WSGIRequest) -> HttpResponse:
         )
     if not history:
         musiq.update_state()
+    else:
+        # History votes change chart/history metadata, never queue order. Drop
+        # shared read snapshots so the next poll cannot restore an old score.
+        from core.state_handler import send_state
+        send_state({})
     return JsonResponse(response)
 
 
 def played_history(request: WSGIRequest) -> HttpResponse:
     """Return the bounded event timeline and authoritative personal vote states."""
-    from core import played_history as history_store, voting
+    from core import voting
 
-    page = list(history_store.recent())
+    try:
+        page = _poll_history()
+    except _PollSnapshotBusy:
+        return _poll_busy_response()
     response = JsonResponse({"songs": [{
         "id": row.id, "artist": row.artist, "title": row.title,
         "occurrenceId": str(row.occurrence_id), "votes": row.votes,
@@ -519,3 +592,4 @@ def played_history(request: WSGIRequest) -> HttpResponse:
     } for row in page], "nextCursor": None, "myVotes": voting.personal_state(request, page)})
     response["Cache-Control"] = "private, no-store"
     return response
+
