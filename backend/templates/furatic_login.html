@@ -238,11 +238,10 @@
         <form method="post" action="">
           {% csrf_token %}
 
-          {% if form.non_field_errors %}
+          {% if form.errors %}
             <div class="error">
-              {% for error in form.non_field_errors %}
-                <div>{{ error }}</div>
-              {% endfor %}
+              {% for error in form.non_field_errors %}<div>{{ error }}</div>{% endfor %}
+              {% for field in form %}{% for error in field.errors %}<div>{{ error }}</div>{% endfor %}{% endfor %}
             </div>
           {% endif %}
 
@@ -257,6 +256,7 @@
               name="username"
               type="text"
               autocomplete="username"
+              maxlength="150"
               autofocus
               required
             >
@@ -269,6 +269,7 @@
               name="password"
               type="password"
               autocomplete="current-password"
+              maxlength="4096"
               required
             >
           </div>
@@ -283,3 +284,4 @@
     </main>
   </body>
 </html>
+
