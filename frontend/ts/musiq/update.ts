@@ -658,11 +658,11 @@ function createQueueItem(history = false) {
       .addClass('queue-vote-cluster')
       .appendTo(controls);
 
-  $('<i/>')
+  $('<button/>')
       .addClass('fas')
       .addClass('fa-chevron-circle-up')
       .addClass('vote-up')
-      .attr('role', 'button')
+      .attr('type', 'button')
       .attr('tabindex', '0')
       .attr('aria-label', 'Upvote this song')
       .appendTo(voteCluster);
@@ -672,11 +672,11 @@ function createQueueItem(history = false) {
       .text('0')
       .appendTo(voteCluster);
 
-  $('<i/>')
+  $('<button/>')
       .addClass('fas')
       .addClass('fa-chevron-circle-down')
       .addClass('vote-down')
-      .attr('role', 'button')
+      .attr('type', 'button')
       .attr('tabindex', '0')
       .attr('aria-label', 'Downvote this song')
       .appendTo(voteCluster);
@@ -869,6 +869,8 @@ export function reconcileList(selector: string, songs: any[], animate = true, hi
       row.dataset.historyId = String(song.id || 0);
       row.dataset.historyPending = String(Boolean(song.pendingHistory));
       row.classList.add('furatic-history-song');
+      if (song.pendingHistory) row.dataset.furaticOwnHistory = String(Boolean(song.ownedHistory));
+      if (song.ownershipSeed) row.dataset.ownershipSeed = String(song.ownershipSeed);
       row.querySelectorAll('.queue-admin-controls, .download-icon, .vote-indicators').forEach(node => node.remove());
       const duration = row.querySelector('.queue-info-time');
       duration.setAttribute('title', 'Played ' + new Date(song.endedAt).toLocaleTimeString());
