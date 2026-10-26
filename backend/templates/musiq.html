@@ -28,7 +28,7 @@
 		<i class="fas fa-stream icon-disabled" id="playlist-mode"{% if not controls_enabled %} style="display: none"{%endif%}></i>
 		<i class="fas fa-dice" id="random-suggestion"></i>
 		<span class="clearable">
-			<input class="form-control autocomplete" id="music-input" placeholder="Search for Music..." autofocus autocomplete="off">
+			<input class="form-control autocomplete" id="music-input" maxlength="2048" placeholder="Search for Music..." autofocus autocomplete="off">
 			<i class="fas fa-times" id="clearbutton"></i>
 		</span>
 		<div class="anim-container" id="request-button-container">
@@ -112,3 +112,4 @@
 </div>
 
 {% endblock %}
+
