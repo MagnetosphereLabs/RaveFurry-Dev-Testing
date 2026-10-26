@@ -258,6 +258,8 @@ def admin_required(func):
 def client_identity(request, create: bool = True):
     """Resolve the unique random browser cookie to its server-side codename."""
     from core.models import ClientIdentity
+    if hasattr(request, "furatic_identity") and (request.furatic_identity is not None or not create):
+        return request.furatic_identity
     raw = str(getattr(request, "furatic_browser_token", "") or request.COOKIES.get(CLIENT_TOKEN_COOKIE, ""))
     if not re.fullmatch(r"[A-Za-z0-9_-]{32,128}", raw):
         if not create:
@@ -276,12 +278,30 @@ def client_identity(request, create: bool = True):
     if identity is None and create:
         word = CODENAME_WORDS[int(digest[:8], 16) % len(CODENAME_WORDS)]
         base = f"{word}-{(int(digest[8:16], 16) % 97) + 1:02d}"
-        codename = base
-        suffix = 1
-        while ClientIdentity.objects.filter(codename=codename).exists():
-            suffix += 1
-            codename = f"{base}-{suffix}"
-        identity = ClientIdentity.objects.create(token_hash=digest, codename=codename, first_ip=ip, last_ip=ip)
+        from django.db import IntegrityError, transaction
+        # get_or_create resolves simultaneous requests for the same token. A
+        # separate savepoint keeps a codename collision from poisoning callers.
+        for suffix in range(1, 33):
+            codename = base if suffix == 1 else f"{base}-{suffix}"
+            try:
+                with transaction.atomic():
+                    identity, _ = ClientIdentity.objects.get_or_create(
+                        token_hash=digest,
+                        defaults={"codename": codename, "first_ip": ip, "last_ip": ip},
+                    )
+                break
+            except IntegrityError:
+                identity = ClientIdentity.objects.filter(token_hash=digest).first()
+                if identity is not None:
+                    break
+                if not ClientIdentity.objects.filter(codename=codename).exists():
+                    raise
+        else:
+            with transaction.atomic():
+                identity, _ = ClientIdentity.objects.get_or_create(
+                    token_hash=digest, defaults={"codename": f"{base}-{digest[:16]}",
+                                                "first_ip": ip, "last_ip": ip},
+                )
     elif identity:
         now = timezone.now()
         updates = {}
@@ -1208,3 +1228,4 @@ def tracked(
                 logger.warning("failed to finish tracked request cleanup: %s", error)
 
     return wraps(func)(_decorator)
+
