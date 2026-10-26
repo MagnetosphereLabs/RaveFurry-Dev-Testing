@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Command line program that handles the Raveberry installation."""
 import getpass
+import logging
 import os
 import shutil
 import subprocess
@@ -337,6 +338,22 @@ help        show this help and exit""",
             self._clear_status_line()
             print(message, flush=True)
             self._draw_status_line()
+        # Keep the recovery reason even after the console is closed. Login
+        # credentials are printed by a different method and never enter this log.
+        try:
+            event_logger = logging.getLogger("furatic.supervisor")
+            if not event_logger.handlers:
+                from core.logging_handlers import WindowsSafeRotatingFileHandler
+                handler = WindowsSafeRotatingFileHandler(
+                    pathlib.Path(self.directory) / "logs" / "supervisor.log",
+                    maxBytes=1024 * 1024, backupCount=3, encoding="utf-8", retry_attempts=1)
+                handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
+                event_logger.addHandler(handler)
+                event_logger.setLevel(logging.INFO)
+                event_logger.propagate = False
+            event_logger.info(message)
+        except Exception:
+            pass
 
     def _print_login_block(
         self,
@@ -357,9 +374,9 @@ help        show this help and exit""",
             "import os; "
             "os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'main.settings'); "
             "from waitress import serve; "
-            "from django.contrib.staticfiles.handlers import StaticFilesHandler; "
+            "from core.request_guard import guarded_static_application; "
             "from main.wsgi import application as django_application; "
-            "application = StaticFilesHandler(django_application); "
+            "application = guarded_static_application(django_application); "
             "serve("
             "application, "
             "host='127.0.0.1', "
@@ -414,13 +431,17 @@ help        show this help and exit""",
             server.wait(timeout=5)
 
     def _web_server_healthy(self) -> bool:
+        self._web_health_reason = ""
         try:
-            with urllib.request.urlopen(
-                "http://127.0.0.1:8080/_healthz/",
-                timeout=3,
-            ) as response:
+            # Environment proxies must never intercept a loopback health check.
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            with opener.open("http://127.0.0.1:8080/_healthz/", timeout=3) as response:
                 return 200 <= response.status < 300
-        except (OSError, urllib.error.URLError, TimeoutError):
+        except urllib.error.HTTPError as error:
+            if error.code == 503 and error.headers.get("X-Furatic-Recovery") == "playback-worker-failed":
+                self._web_health_reason = "playback-worker-failed"
+            return False
+        except (OSError, TimeoutError):
             return False
 
     @staticmethod
@@ -558,6 +579,7 @@ help        show this help and exit""",
             self._console_message("FURATIC controls ready. Press H for help.")
 
             bad_health_checks = 0
+            health_failed_since = None
             bad_database_checks = 0
             last_health_check = 0.0
             last_database_check = 0.0
@@ -633,15 +655,23 @@ help        show this help and exit""",
                         continue
 
                 now = time.monotonic()
-                if now - last_health_check >= 10:
+                if now - last_health_check >= 2:
                     last_health_check = now
                     if self._web_server_healthy():
                         bad_health_checks = 0
+                        health_failed_since = None
                     else:
+                        if bad_health_checks == 0 or health_failed_since is None:
+                            health_failed_since = now
                         bad_health_checks += 1
-                        if bad_health_checks >= 3:
+                        confirmed_worker_failure = self._web_health_reason == "playback-worker-failed"
+                        # Positive evidence of a dead worker can recover promptly.
+                        # Ordinary slow/missed HTTP probes still need sustained
+                        # failure; increasing the probe rate must not shorten that grace.
+                        if confirmed_worker_failure or (bad_health_checks >= 3 and now - health_failed_since >= 20):
                             self._console_message(
-                                "Web server health check failed repeatedly. Restarting..."
+                                "Playback worker failed; recovering between songs..." if confirmed_worker_failure
+                                else "Web server health check failed repeatedly. Restarting..."
                             )
                             self._stop_windows_web_server(server)
                             self._clear_restart_request()
@@ -941,4 +971,5 @@ help        show this help and exit""",
 
 if __name__ == "__main__":
     Raveberry().main()
+
 
