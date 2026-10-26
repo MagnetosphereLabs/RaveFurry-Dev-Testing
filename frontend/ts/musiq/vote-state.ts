@@ -27,13 +27,26 @@ export function acceptVote(vote: PersonalVote, force = false) {
   paintVotes();
 }
 export function paintVotes() {
+  let historyOwnershipChanged = false;
   document.querySelectorAll<HTMLElement>('[data-occurrence-id]').forEach(row => {
     const occurrence = row.dataset.occurrenceId;
     const vote = votes.get(occurrence);
     const extra = row.dataset.priorityTier === 'extra';
+    const history = Boolean(row.dataset.historyId);
+    // In history, eligible=false means the existing server ownership check
+    // forbids voting on this visitor's song. Pending handoffs retain their tint.
+    const ownHistory = history && (row.dataset.historyPending === 'true' || !vote ?
+      row.dataset.furaticOwnHistory === 'true' : vote.eligible === false);
+    if (history) {
+      row.dataset.furaticOwnHistory = String(ownHistory);
+      if (row.classList.contains('furatic-owned-song') !== ownHistory) {
+        row.classList.toggle('furatic-owned-song', ownHistory);
+        historyOwnershipChanged = true;
+      }
+    }
     row.querySelectorAll<HTMLElement>('.vote-up, .vote-down').forEach(button => {
-      if (row.dataset.historyId) button.dataset.furaticOwnVoteBlocked = String(vote?.eligible === false);
-      button.classList.toggle('pressed', Boolean(vote && (button.classList.contains('vote-up') ? vote.choice > 0 : vote.choice < 0)));
+      if (history) button.dataset.furaticOwnVoteBlocked = String(ownHistory);
+      button.classList.toggle('pressed', Boolean(!ownHistory && vote && (button.classList.contains('vote-up') ? vote.choice > 0 : vote.choice < 0)));
       const disabled = extra || !vote || vote.eligible === false || row.dataset.historyPending === 'true' ||
         pending.has(occurrence) || button.dataset.furaticOwnVoteBlocked === 'true';
       button.dataset.voteKnown = String(Boolean(vote));
@@ -41,6 +54,7 @@ export function paintVotes() {
       button.dataset.votePending = String(pending.has(occurrence));
     });
   });
+  if (historyOwnershipChanged) document.dispatchEvent(new CustomEvent('furatic:history-ownership-change'));
 }
 
 document.addEventListener('furatic:personal-votes', (event: CustomEvent) => {
