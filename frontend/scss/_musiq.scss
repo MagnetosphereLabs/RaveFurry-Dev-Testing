@@ -490,3 +490,20 @@ $entry-height: 50px;
 	display: flex;
 	flex-direction: column;
 }
+
+// Native vote buttons keep the existing icon styling and browser tap semantics.
+button.vote-up, button.vote-down {
+  -webkit-appearance: none;
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  padding: 0;
+  font-size: inherit;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+button.vote-up:focus-visible, button.vote-down:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 2px;
+}
