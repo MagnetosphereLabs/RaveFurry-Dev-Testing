@@ -1680,7 +1680,7 @@
     <ul class="list-group">
         <li class="list-group-item" id="music-input-card">
             <span class="clearable">
-                <input class="form-control" id="music-input" placeholder="Search for music or enter a YouTube link..." autofocus autocomplete="off">
+                <input class="form-control" id="music-input" maxlength="2048" placeholder="Search for music or enter a YouTube link..." autofocus autocomplete="off">
                 <i class="fas fa-times" id="clearbutton"></i>
             </span>
             <div class="anim-container" id="request-button-container">
@@ -2714,3 +2714,4 @@
 })();
 </script>
 {% endblock %}
+
