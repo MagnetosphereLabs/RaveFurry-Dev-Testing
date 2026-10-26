@@ -1,5 +1,4 @@
 /** Display-only rules mirrored in core/musiq/display_name.py and shared fixtures. */
-const brackets = /\(([^()]*)\)|\[([^\[\]]*)\]/g;
 const separator = /\s+[-–—|]\s+/;
 const quality = '(?:music\\s+)?(?:hq|hd|flac|lossless|[48]k|\\d{3,4}p)';
 const junk = new RegExp('^(?:(?:(?:official|unofficial)\\s+)?' +
@@ -9,17 +8,20 @@ const junk = new RegExp('^(?:(?:(?:official|unofficial)\\s+)?' +
 const text = value => String(value || '').normalize('NFKC').replace(/\s+/g, ' ').trim();
 const key = (value: string) => value.toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
 
-function annotations(value: string, creditKeys = new Set<string>()): string {
-  let previous: string;
-  do {
-    previous = value;
-    value = value.replace(brackets, (match, round, square) => {
-      const label = (round === undefined ? square : round).trim();
-      const credit = label.replace(/^(?:feat(?:uring)?\.?|ft\.?|with)\s+/i, '');
-      return !label || junk.test(label) || creditKeys.has(key(credit)) ? ' ' : match;
-    });
-  } while (previous !== value);
-  return text(value);
+function annotations(value: string): string {
+  const pairs = new Map<string, string>([['(', ')'], ['[', ']'], ['{', '}'], ['【', '】'], ['〔', '〕'],
+    ['「', '」'], ['『', '』'], ['〈', '〉'], ['《', '》']]);
+  const closers = new Set(pairs.values());
+  const stack: string[] = [], result: string[] = [];
+  for (const char of value) {
+    if (pairs.has(char)) {
+      if (!stack.length) result.push(' ');
+      stack.push(pairs.get(char));
+    } else if (closers.has(char)) {
+      if (stack.length && char === stack[stack.length - 1]) stack.pop();
+    } else if (!stack.length) result.push(char);
+  }
+  return text(result.join(''));
 }
 
 function segments(title: string): {parts: string[], separators: string[]} {
@@ -39,7 +41,7 @@ function segments(title: string): {parts: string[], separators: string[]} {
 
 export function cleanDisplayNames(artist, title): {artist: string, title: string} {
   const rawTitle = text(title);
-  title = annotations(rawTitle) || rawTitle;
+  title = annotations(rawTitle);
   const label = annotations(text(artist)).replace(/\s*[-–—]\s*Topic$|VEVO$/i, '').trim();
   const credits: string[] = [];
   const seen = new Map<string, number>();
@@ -50,7 +52,7 @@ export function cleanDisplayNames(artist, title): {artist: string, title: string
   });
   const keys = new Set(seen.keys());
   if (credits.length) ['', ' x ', ' and '].forEach(joiner => keys.add(key(credits.join(joiner))));
-  title = annotations(title, keys) || title;
+  title = annotations(title);
   const {parts, separators} = segments(title);
   while (parts.length > 1 && junk.test(parts[parts.length - 1].trim())) { parts.pop(); separators.pop(); }
   while (parts.length > 1) {
