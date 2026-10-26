@@ -200,7 +200,7 @@ def _run():
     from django.db import close_old_connections, connections
     from django.utils import timezone
     from core import models, redis, site_mode
-    from core.safe_files import atomic_write_text
+    from core.safe_files import atomic_write_text, OptionalFileStatus
     from core.settings import storage
 
     directory = Path(settings.BASE_DIR) / "config"
@@ -215,6 +215,7 @@ def _run():
     except (OSError, ValueError, KeyError, TypeError):
         director = Director()
     saved = None
+    file_status = OptionalFileStatus("OBS vote notification file", LOGGER)
     last_error = 0
     fields = ("occurrence_id", "external_url", "artist", "title", "votes")
     try:
@@ -253,6 +254,11 @@ def _run():
                 atomic_write_text(message_path, json.dumps({
                     "version": 1, "updatedAt": now.timestamp(), "message": message,
                 }, separators=(",", ":"), allow_nan=False), attempts=1)
+                file_status.succeeded()
+            except OSError as error:
+                file_status.failed(error)
+                connections.close_all()
+                director.rebase = True
             except Exception:  # optional overlays must never interrupt music
                 if time.monotonic() - last_error >= 60:
                     LOGGER.exception("OBS vote notifications temporarily unavailable")
@@ -277,3 +283,4 @@ def stop():
     _stop.set()
     if _thread and _thread is not threading.current_thread():
         _thread.join(timeout=2)
+
