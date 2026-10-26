@@ -110,8 +110,10 @@ def create_app(capture, port):
             if value.get("version") != 1 or not 0 <= now - value["updatedAt"] < 10:
                 raise ValueError("Stale notification")
             message = value.get("message")
-            if message and not message["createdAt"] <= now < message["expiresAt"]:
-                value["message"] = None
+            if message:
+                persistent = message.get("persistent") is True and message.get("kind") in ("rank", "reminder")
+                if message["createdAt"] > now or (not persistent and now >= message["expiresAt"]):
+                    value["message"] = None
             return value
         except (OSError, ValueError, KeyError, TypeError, AttributeError):
             return {"version": 1, "message": None}
