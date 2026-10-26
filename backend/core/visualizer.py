@@ -2,6 +2,7 @@
 import asyncio
 import contextlib
 import json
+import logging
 import os
 from pathlib import Path
 import threading
@@ -9,7 +10,7 @@ import time
 from urllib.parse import urlsplit
 
 from channels.generic.websocket import AsyncWebsocketConsumer
-from django.http import FileResponse, HttpResponse
+from django.http import FileResponse, HttpResponse, JsonResponse
 from django.views.decorators.clickjacking import xframe_options_sameorigin
 from django.views.decorators.http import require_GET
 import requests
@@ -22,6 +23,9 @@ def idle_frame():
                        "kickId": 0, "accentId": 0, "kick": 0, "accent": 0})
 
 
+logger = logging.getLogger(__name__)
+
+
 class FeatureFeed:
     """One bounded loopback feed per web process, shared by all page visitors."""
 
@@ -30,6 +34,7 @@ class FeatureFeed:
         self.thread = None
         self.last_reader = 0
         self.latest = idle_frame()
+        self.last_good = 0.0
 
     def read(self):
         with self.lock:
@@ -44,7 +49,10 @@ class FeatureFeed:
             port = int(os.environ.get("FURATIC_VISUALIZER_PORT", "8766"))
             if not 1024 <= port <= 65535:
                 return
+            failure_since = None
+            last_warning = -float("inf")
             with requests.Session() as session:
+                session.trust_env = False
                 while True:
                     with self.lock:
                         if time.monotonic() - self.last_reader > 10:
@@ -65,8 +73,17 @@ class FeatureFeed:
                         # Capture-device names are unnecessary for public rendering.
                         frame.pop("device", None)
                         value = json.dumps(frame, separators=(",", ":"), allow_nan=False)
-                    except (requests.RequestException, ValueError, TypeError):
-                        value = idle_frame()
+                        self.last_good = time.monotonic()
+                        failure_since = None
+                    except (requests.RequestException, ValueError, TypeError) as error:
+                        now = time.monotonic()
+                        if failure_since is None:
+                            failure_since = now
+                        if now - failure_since >= 5 and now - last_warning >= 60:
+                            logger.warning("website visualizer feed unavailable; retrying: %s", error)
+                            last_warning = now
+                        with self.lock:
+                            value = self.latest if now - self.last_good < 1 else idle_frame()
                     with self.lock:
                         self.latest = value
                     time.sleep(max(0, .020 - (time.monotonic() - started)))
@@ -83,7 +100,14 @@ feed = FeatureFeed()
 @xframe_options_sameorigin
 def background(_request):
     page = Path(__file__).resolve().parent.parent / "visualizer" / "web-background.html"
-    response = FileResponse(page.open("rb"), content_type="text/html")
+    if os.environ.get("FURATIC_LOCAL_HTTP_SERVER", "0").lower() in {"1", "true"}:
+        # Waitress serves HTTP. Select its transport directly instead of making
+        # every browser try an unsupported WebSocket endpoint first.
+        html = page.read_text(encoding="utf-8").replace(
+            'data-furatic-transport="auto"', 'data-furatic-transport="poll"', 1)
+        response = HttpResponse(html, content_type="text/html")
+    else:
+        response = FileResponse(page.open("rb"), content_type="text/html")
     response["Cache-Control"] = "no-store"
     response["X-Content-Type-Options"] = "nosniff"
     return response
@@ -95,6 +119,15 @@ def features(_request):
     response = HttpResponse(feed.read(), content_type="application/json")
     response["Cache-Control"] = "no-store"
     response["X-Content-Type-Options"] = "nosniff"
+    return response
+
+
+@require_GET
+def transport(_request):
+    # Cached clients can try a WebSocket upgrade on WSGI. A normal HTTP response
+    # makes them select the existing polling fallback without a server warning.
+    response = JsonResponse({"transport": "http", "url": "/visualizer/features.json"})
+    response["Cache-Control"] = "no-store"
     return response
 
 
@@ -133,3 +166,4 @@ class VisualizerConsumer(AsyncWebsocketConsumer):
     async def receive(self, text_data=None, bytes_data=None):
         # Website clients cannot alter audio, playback, or the canonical OBS scene.
         await self.close(code=1008)
+
