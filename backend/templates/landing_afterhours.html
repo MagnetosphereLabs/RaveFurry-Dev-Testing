@@ -929,7 +929,8 @@
       }
 
       function songArtwork(song) {
-        return /^https?:\/\//i.test(String(song.artworkUrl || "")) ? '<img src="' + escapeSongText(song.artworkUrl) + '" alt="" loading="lazy" decoding="async" onerror="this.remove()">' : "";
+        const source = String(song.artworkUrl || "");
+        return (/^https?:\/\//i.test(source) || /^\/song-artwork\/[A-Za-z0-9_-]{11}\/$/.test(source)) ? '<img src="' + escapeSongText(source) + '" alt="" loading="lazy" decoding="async" onerror="this.remove()">' : "";
       }
 
       function renderEventData(data, animate) {
