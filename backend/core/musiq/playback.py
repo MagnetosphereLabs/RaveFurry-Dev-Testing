@@ -16,7 +16,7 @@ from django.db import connection, transaction
 from django.db.models import Case, F, IntegerField, Value, When
 from django.utils import timezone
 
-from core import models, obs_export, redis, user_manager, playback_state_backup, site_mode
+from core import models, obs_state, redis, user_manager, playback_state_backup, site_mode
 from core.lights import controller as lights_controller
 from core.musiq import audio_tail, musiq, next_up, player
 from core.settings import storage
@@ -106,7 +106,7 @@ def start() -> None:
     redis.put("stop_playback_loop", False)
     redis.put("playback_worker_failed", False)
 
-    obs_export.start()
+    obs_state.start()
     _handle_buzzer.delay()
     _loop.delay()
 
@@ -336,34 +336,6 @@ class Playback:
             return None, False
         redis.put("backup_playing", False)
         assert song.internal_url
-        cover_source = (
-            Path(conf.FURATIC_OBS_OUTPUT_DIR).expanduser()
-            / "artwork"
-            / f"queue-{song_id}.jpg"
-        )
-        cover_target = (
-            Path(conf.FURATIC_OBS_OUTPUT_DIR).expanduser()
-            / "songcover.jpg"
-        )
-        
-        if cover_source.is_file():
-            try:
-                cover_temporary = cover_target.with_suffix(".tmp")
-                shutil.copyfile(cover_source, cover_temporary)
-        
-                retry_file_operation(
-                    lambda: os.replace(cover_temporary, cover_target),
-                    description="replace OBS song cover",
-                    logger=logging.getLogger(__name__),
-                )
-            except OSError:
-                logging.exception("failed to export OBS song cover")
-        else:
-            safe_unlink(
-                cover_target,
-                missing_ok=True,
-                logger=logging.getLogger(__name__),
-            )
 
         playback_state_backup.snapshot()
         handle_autoplay()
@@ -790,7 +762,9 @@ def handle_autoplay(url: Optional[str] = None) -> None:
 def stop() -> None:
     """Stops the playback main loop, only used for tests."""
     redis.put("stop_playback_loop", True)
-    obs_export.stop()
+    obs_state.stop()
+    from core.musiq import cache_backfill
+    cache_backfill.stop()
     queue_changed.set()
 
 

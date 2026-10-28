@@ -369,10 +369,25 @@ class SongProvider(MusicProvider):
                             queryset.update(counter=F("counter") + 1)
                         archived_song = queryset.get()
     
+                    # Keep complete credits and provider metadata for cached replays.
+                    for field in ('artist', 'title', 'duration', 'cached'):
+                        value = metadata.get(field)
+                        if value is not None and value != '' and (field != 'duration' or value > 0):
+                            setattr(archived_song, field, value)
+                    archived_song.save(update_fields=['artist', 'title', 'duration', 'cached'])
+                    data = dict(archived_song.cached_metadata or {})
+                    for field in ('artwork_url', 'genre'):
+                        if metadata.get(field) and not str(data.get(field, '')).startswith('/song-artwork/'):
+                            data[field] = metadata[field]
+                    archived_song.cached_metadata = data
+                    archived_song.save(update_fields=['cached_metadata'])
                     if archive:
                         ArchivedQuery.objects.get_or_create(
                             song=archived_song, query=self.query
                         )
+                        original_query = getattr(self, 'submission_query', '')
+                        if original_query and original_query != self.query:
+                            ArchivedQuery.objects.get_or_create(song=archived_song, query=original_query[:1000])
                 break
             except OperationalError as exc:
                 if "database is locked" not in str(exc).lower():

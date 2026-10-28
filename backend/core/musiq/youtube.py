@@ -81,12 +81,12 @@ YTMUSIC_TIMEOUT_SECONDS = 25
 YTDLP_SOCKET_TIMEOUT_SECONDS = 30
 
 
-def get_ytmusic() -> ytmusicapi.YTMusic:
+def get_ytmusic(timeout=YTMUSIC_TIMEOUT_SECONDS) -> ytmusicapi.YTMusic:
     """Return a YTMusic client with a short timeout so requests cannot hang forever."""
     session = requests.Session()
     session.request = functools.partial(  # type: ignore[method-assign]
         session.request,
-        timeout=YTMUSIC_TIMEOUT_SECONDS,
+        timeout=timeout,
     )
     return ytmusicapi.YTMusic(requests_session=session)
 
@@ -188,8 +188,12 @@ class YoutubeSongProvider(SongProvider, Youtube):
 
     def check_cached(self) -> bool:
         if not self.id:
-            # id could not be extracted from query, needs to be serched
-            return False
+            from core.musiq.song_cache import resolve
+            saved = resolve(self.query or '')
+            if saved:
+                self.id = youtube_video_id(saved.url)
+            else:
+                return False
         if storage.get("output") == "client":
             # youtube streaming links need to be fetched each time the song is requested
             return False
@@ -281,7 +285,7 @@ class YoutubeSongProvider(SongProvider, Youtube):
                     entries = search_result.get("entries") or []
                     for entry in entries:
                         duration = entry.get("duration")
-                        if duration is not None and duration > self.MAX_DURATION_SECONDS:
+                        if duration is not None and duration > self.max_duration_seconds() > 0:
                             continue
                         self.info_dict = entry
                         self.error = ""
@@ -397,6 +401,12 @@ class YoutubeSongProvider(SongProvider, Youtube):
 
     def gather_metadata(self) -> bool:
         metadata = self.get_local_metadata(self.get_path())
+
+        # Complete local credits are authoritative for an already downloaded video.
+        # Lyrics/artwork backfill runs independently; playback needs no provider.
+        if not getattr(self, 'force_metadata_refresh', False) and self.check_cached() and metadata.get('title') and float(metadata.get('duration') or 0) > 0:
+            self.metadata = metadata
+            return True
 
         if not self.info_dict:
             try:

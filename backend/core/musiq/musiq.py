@@ -22,7 +22,7 @@ from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_POST
 from core.input_validation import music_query
 
-from core import audit_log, base, obs_export, redis, site_mode, user_manager, util
+from core import audit_log, base, obs_state, redis, site_mode, user_manager, util
 from core.models import CurrentSong, QueuedSong
 from core.musiq import audio_tail, controller, next_up, playback, song_utils
 from core.musiq.music_provider import MusicProvider, ProviderError, WrongUrlError
@@ -106,6 +106,8 @@ def start() -> None:
 
     controller.start()
     playback.start()
+    from core.musiq import cache_backfill
+    cache_backfill.start()
 
 
 def get_alarm_metadata() -> "Metadata":
@@ -260,7 +262,7 @@ def _format_cooldown_remaining(seconds: int) -> str:
         f"and {remaining_seconds} second{'s' if remaining_seconds != 1 else ''}"
     )
 
-# accessed by the discord bot
+# Primary submission endpoint for the landing page and embedded queue.
 @csrf_exempt
 @require_POST
 @user_manager.tracked
@@ -317,120 +319,130 @@ def request_music(request: WSGIRequest) -> HttpResponse:
         if not archive.objects.filter(pk=key).exists():
             return HttpResponseBadRequest("That saved song selection is no longer available. Please search again.")
 
+    from core.submission_admission import reserve, AdmissionError
     try:
-        providers = get_providers(query, key, playlist, platform)
-    except ProviderError as error:
-        return HttpResponseBadRequest(str(error))
-    except ValueError:
-        return HttpResponseBadRequest("That music selection is not valid. Please search again.")
-
-    if playlist:
-        provider = try_providers(
-            session_key,
-            providers,
-            requester_ip=requester_ip,
-        )
-        if provider.error:
-            return HttpResponseBadRequest(provider.error)
-        user_manager.remember_request_cooldown(requester_ip, session_key)
-        return JsonResponse({"message": provider.ok_message, "key": None})
-
-    provider = try_providers(
-        session_key,
-        providers,
-        requester_ip=requester_ip,
-        defer_enqueue=True,
-    )
-    if provider.error:
-        return HttpResponseBadRequest(provider.error)
-
-    assert isinstance(provider, SongProvider)
-    queued_song = provider.queued_song
-    if not queued_song:
-        logging.error(
-            "no placeholder was created for query '%s' and key '%s'", query, key
-        )
-        return HttpResponseBadRequest("No placeholder was created")
-
-    with transaction.atomic():
-        # Serialize ownership assignment after placeholder creation; worker
-        # threads must never be asked to use an uncommitted queue row.
-        from core import queue_lock
-        queue_lock.acquire()
-        if not site_mode.accepts_song_requests():
+        with reserve(requester_token, identity.pk) as reservation:
             try:
-                queue.remove(queued_song.id)
-            except QueuedSong.DoesNotExist:
-                pass
-            transaction.on_commit(playback.queue_changed.set)
-            return HttpResponseBadRequest(
-                "Closing time: we are no longer accepting new songs. Thanks for coming!"
-                if site_mode.is_closing() else "FURATIC is currently in After Hours mode."
+                providers = get_providers(query, key, playlist, platform)
+            except ProviderError as error:
+                return HttpResponseBadRequest(str(error))
+            except ValueError:
+                return HttpResponseBadRequest("That music selection is not valid. Please search again.")
+        
+            if playlist:
+                provider = try_providers(
+                    session_key,
+                    providers,
+                    requester_ip=requester_ip,
+                )
+                if provider.error:
+                    return HttpResponseBadRequest(provider.error)
+                user_manager.remember_request_cooldown(requester_ip, session_key)
+                return JsonResponse({"message": provider.ok_message, "key": None})
+        
+            provider = try_providers(
+                session_key,
+                providers,
+                requester_ip=requester_ip,
+                defer_enqueue=True,
             )
-        from core.models import ClientIdentity  # pylint: disable=import-outside-toplevel
-
-        ClientIdentity.objects.select_for_update().get(pk=identity.pk)
-        active_count = (
-            queue.filter(requester_token=requester_token).count()
-            + CurrentSong.objects.filter(requester_token=requester_token).count()
-        )
-        if active_count >= 5:
-            try:
-                playback.queue.remove(queued_song.id)
-            except QueuedSong.DoesNotExist:
-                pass
-            return HttpResponseBadRequest("You may have up to 5 active songs at once.")
-        assert isinstance(provider, SongProvider)
-        queue_key = queued_song.id
-        has_primary = (
-            queue.filter(
-                requester_token=requester_token,
-                priority_tier="normal",
-            ).exclude(id=queue_key).exists()
-            or CurrentSong.objects.filter(requester_token=requester_token).exists()
-        )
-        queue.filter(id=queue_key).update(
-            requester_token=requester_token,
-            priority_tier="extra" if has_primary else "normal",
-        )
-        queued_song.refresh_from_db()
-        from core import voting
-        voting.seed_requester_vote(request, queued_song)
-        queue.rebalance_priorities()
-
-    user_manager.remember_requester_ip(
-        requester_ip,
-        queue_key,
-        session_key=session_key,
-    )
-
-    if storage.get("ip_checking"):
-        user_manager.try_vote(requester_ip, queue_key, 1, record_activity=False)
-
-    if storage.get("color_indication") != storage.Privileges.nobody:
-        user_manager.register_song(request, queue_key)
-        user_manager.register_vote(request, queue_key, 1)
-
-    audit_log.append(
-        "user_add_song",
-        request=request,
-        target="queue",
-        song_key=queue_key,
-        song_title=queued_song.displayname(),
-    )
-    update_state()
-    provider.submission_token = requester_token
-    song_number = active_count + 1
-    ordinal = str(song_number) + {2: "nd", 3: "rd"}.get(song_number, "th")
-    provider.submission_message = (
-        f"Added your {ordinal} song to the pre-queue."
-        if has_primary else provider.ok_message
-    )
-    provider.submission_query = query
-    user_manager.remember_request_cooldown(requester_ip, session_key)
-    provider.start_deferred_enqueue()
-
-    return JsonResponse({"message": provider.submission_message, "key": queue_key, "pending": True})
+            if provider.error:
+                return HttpResponseBadRequest(provider.error)
+        
+            assert isinstance(provider, SongProvider)
+            queued_song = provider.queued_song
+            if not queued_song:
+                logging.error(
+                    "no placeholder was created for query '%s' and key '%s'", query, key
+                )
+                return HttpResponseBadRequest("No placeholder was created")
+        
+            with transaction.atomic():
+                # Serialize ownership assignment after placeholder creation; worker
+                # threads must never be asked to use an uncommitted queue row.
+                from core import queue_lock
+                queue_lock.acquire()
+                if not site_mode.accepts_song_requests():
+                    try:
+                        queue.remove(queued_song.id)
+                    except QueuedSong.DoesNotExist:
+                        pass
+                    transaction.on_commit(playback.queue_changed.set)
+                    return HttpResponseBadRequest(
+                        "Closing time: we are no longer accepting new songs. Thanks for coming!"
+                        if site_mode.is_closing() else "FURATIC is currently in After Hours mode."
+                    )
+                from core.models import ClientIdentity  # pylint: disable=import-outside-toplevel
+        
+                ClientIdentity.objects.select_for_update().get(pk=identity.pk)
+                from core.models import RequestReservation
+                if not RequestReservation.objects.filter(pk=reservation.pk, expires_at__gt=timezone.now()).exists():
+                    queue.remove(queued_song.id)
+                    return HttpResponseBadRequest("The song lookup timed out. Please try again.")
+                RequestReservation.objects.filter(pk=reservation.pk).delete()
+                active_count = (
+                    queue.filter(requester_token=requester_token).count()
+                    + CurrentSong.objects.filter(requester_token=requester_token).count()
+                )
+                if active_count >= 5:
+                    try:
+                        playback.queue.remove(queued_song.id)
+                    except QueuedSong.DoesNotExist:
+                        pass
+                    return HttpResponseBadRequest("You may have up to 5 active songs at once.")
+                assert isinstance(provider, SongProvider)
+                queue_key = queued_song.id
+                has_primary = (
+                    queue.filter(
+                        requester_token=requester_token,
+                        priority_tier="normal",
+                    ).exclude(id=queue_key).exists()
+                    or CurrentSong.objects.filter(requester_token=requester_token).exists()
+                )
+                queue.filter(id=queue_key).update(
+                    requester_token=requester_token,
+                    priority_tier="extra" if has_primary else "normal",
+                )
+                queued_song.refresh_from_db()
+                from core import voting
+                voting.seed_requester_vote(request, queued_song)
+                queue.rebalance_priorities()
+        
+            user_manager.remember_requester_ip(
+                requester_ip,
+                queue_key,
+                session_key=session_key,
+            )
+        
+            if storage.get("ip_checking"):
+                user_manager.try_vote(requester_ip, queue_key, 1, record_activity=False)
+        
+            if storage.get("color_indication") != storage.Privileges.nobody:
+                user_manager.register_song(request, queue_key)
+                user_manager.register_vote(request, queue_key, 1)
+        
+            audit_log.append(
+                "user_add_song",
+                request=request,
+                target="queue",
+                song_key=queue_key,
+                song_title=queued_song.displayname(),
+            )
+            update_state()
+            provider.submission_token = requester_token
+            song_number = active_count + 1
+            ordinal = str(song_number) + {2: "nd", 3: "rd"}.get(song_number, "th")
+            provider.submission_message = (
+                f"Added your {ordinal} song to the pre-queue."
+                if has_primary else provider.ok_message
+            )
+            provider.submission_query = query
+            user_manager.remember_request_cooldown(requester_ip, session_key)
+            provider.start_deferred_enqueue()
+        
+            return JsonResponse({"message": provider.submission_message, "key": queue_key, "pending": True})
+    except AdmissionError as error:
+        return HttpResponseBadRequest(str(error))
 
 
 @user_manager.tracked
@@ -656,8 +668,7 @@ def state_dict() -> Dict[str, Any]:
     return state
 
 def update_state() -> None:
-    """Sends an update event to all connected clients and refreshes OBS exports."""
+    """Sends an update event to all connected clients and invalidates shared snapshots."""
     state = state_dict()
-    obs_export.write_from_state(state)
     send_state(state)
 
