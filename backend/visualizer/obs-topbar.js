@@ -251,7 +251,7 @@
       canvas.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;border-radius:inherit';
       coverSurfaces.push(canvas);
     }
-    const unit = Math.min(innerWidth*.017,innerHeight*.03022226);
+    const unit = layoutUnit();
     const pixels = Math.min(1024,Math.max(64,Math.ceil((parseFloat(bar.style.getPropertyValue('--obs-cover-size')) || unit*6.7)*(window.devicePixelRatio || 1)*1.1)));
     // Draw once per cover into a display-sized backing store, with no frame
     // queue and no full-size HTML image retained for the current song.
@@ -385,7 +385,7 @@
     const songWidth = notice.dataset.kind === 'reminder' ? 0 : width(noticeFields.title) + width(noticeFields.artist) + gap(song);
     const padding = parseFloat(getComputedStyle(notice).paddingLeft) || 0;
     const required = Math.ceil(Math.max(headerWidth,footerWidth,songWidth,width(noticeFields.detail)) + padding + 3);
-    const unit = Math.min(innerWidth*.017,innerHeight*.03022226);
+    const unit = layoutUnit();
     const available = bar.clientWidth - 2*(parseFloat(getComputedStyle(bar).paddingLeft)||0) - unit*.8;
     const maximum = Math.min(available*.62, available-unit*18);
     if (available > 0 && required > padding + 3) {
@@ -393,10 +393,13 @@
       if (Math.abs((parseFloat(bar.style.getPropertyValue('--obs-notice-width'))||0)-target) > .5) bar.style.setProperty('--obs-notice-width',target+'px');
     }
   }
+  let videoLayout = false;
+  function layoutUnit() { return Math.min(innerWidth*.017,innerHeight*.03022226)*(videoLayout?.85:1); }
   function matchOriginalNoticeHeight() {
     // Measure a full original achievement card offscreen. This locks the bar
     // to its existing broadcast height, independent of reminder/song text.
-    const reference = notice.cloneNode(true), unit = Math.min(innerWidth*.017,innerHeight*.03022226);
+    const reference = notice.cloneNode(true), unit = layoutUnit();
+    bar.style.setProperty('--u',unit+'px');
     const old = {};
     for (const key of ['headline','title','artist','detail','footer','badge']) old[key]=reference.querySelector('#vote-notice-'+key);
     reference.removeAttribute('id');
@@ -451,6 +454,13 @@
     textSlots.delete(element); texts.delete(element); resize.unobserve?.(element);
   }
   window.FuraticOBSUI = {
+    setVideoLayout(value) {
+      value=Boolean(value);if(value===videoLayout)return;
+      const before=bar.getBoundingClientRect().height;videoLayout=value;matchOriginalNoticeHeight();
+      const after=bar.getBoundingClientRect().height;
+      if(!normalSuspended&&before>0&&after>0){bar.style.transformOrigin='top center';animate(bar,[{transform:'scaleY('+before/after+')',filter:'blur(1.5px)'},{transform:'none',filter:'none'}],{duration:550,easing});}
+      for(const element of texts.keys())marquee(element);
+    },
     text(element,value,digits=false) { resize.observe(element); typeText(element,value,digits); },
     animate, paint:paintBitmap, remove:removeNode, release:releaseText,
     get snapshot() { return snapshot; },

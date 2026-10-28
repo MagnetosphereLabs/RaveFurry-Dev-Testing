@@ -34,9 +34,10 @@
     let resources=null,enabled=!window.FuraticOBSPresentation?.active,showing=Boolean(initialVisibility)&&!document.hidden,dead=false,alpha=enabled?1:0;
     const desired=new Float32Array(26),bands=new Float32Array(26),color=new Float32Array([1,1,1,0]),desiredColor=new Float32Array([1,1,1,0]);
     let targetScale=.7,scale=.7,received=-Infinity;
+    let videoLayout=window.FuraticOBSVideo?.layout==='video',barHeight=videoLayout?.75:1,logoAlpha=videoLayout?0:1;
     const vertex=`#version 300 es
     precision highp float;precision highp int;
-    uniform vec2 u_resolution;uniform float u_bands[26];uniform float u_scale;uniform float u_opacity;uniform int u_logo;
+    uniform vec2 u_resolution;uniform float u_bands[26];uniform float u_scale;uniform float u_opacity;uniform float u_barHeight;uniform int u_logo;
     out vec2 v_uv;out vec2 v_size;
     void main(){
       vec2 corner=vec2(float(gl_VertexID&1),float((gl_VertexID>>1)&1));vec2 pixel;
@@ -45,7 +46,7 @@
         pixel=u_resolution*.5+(corner-.5)*width;v_size=vec2(width);
       }else{
         float sx=u_resolution.x/1920.;float sy=u_resolution.y/1080.;float area=1420.*sx;
-        float height=42.+283.*u_bands[gl_InstanceID];v_size=vec2(42.,height);
+        float height=(42.+283.*u_bands[gl_InstanceID])*u_barHeight;v_size=vec2(42.,height);
         float left=(u_resolution.x-area*1242./1280.)*.5+float(gl_InstanceID)*48./1280.*area;
         pixel=vec2(left+corner.x*42./1280.*area,u_resolution.y-24.*sy-height*sy+corner.y*height*sy+(1.-u_opacity)*85.*sy);
       }
@@ -56,12 +57,29 @@
     uniform vec4 u_color;uniform sampler2D u_texture;uniform float u_opacity;uniform int u_logo;out vec4 fragColor;
     void main(){
       if(u_logo==1){fragColor=texture(u_texture,v_uv);fragColor.a*=u_opacity;}
-      else{vec2 p=abs(v_uv*v_size-v_size*.5)-(v_size*.5-21.);float distance=length(max(p,0.))+min(max(p.x,p.y),0.)-21.;float edge=max(.5,fwidth(distance));fragColor=vec4(u_color.rgb,u_color.a*u_opacity*(1.-smoothstep(-edge,edge,distance)));}
+      else{float radius=min(21.,v_size.y*.5);vec2 p=abs(v_uv*v_size-v_size*.5)-(v_size*.5-radius);float distance=length(max(p,0.))+min(max(p.x,p.y),0.)-radius;float edge=max(.5,fwidth(distance));fragColor=vec4(u_color.rgb,u_color.a*u_opacity*(1.-smoothstep(-edge,edge,distance)));}
     }`;
     function free(valid=true){
       cancelImage('foreground-logo');
       if(resources&&valid){gl.deleteTexture(resources.texture);gl.deleteVertexArray(resources.vao);gl.deleteProgram(resources.program);}
       resources=null;
+    }
+    function freeLogo(){
+      cancelImage('foreground-logo');
+      if(resources?.texture&&(resources.ready||resources.logoRequested)){
+        // Retain only a four-byte complete sampler for the shared bar shader.
+        // Replacing its storage releases the decoded logo's GPU backing.
+        gl.bindTexture(gl.TEXTURE_2D,resources.texture);gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,1,1,0,gl.RGBA,gl.UNSIGNED_BYTE,new Uint8Array(4));
+        resources.ready=false;resources.logoRequested=false;
+      }
+    }
+    function ensureLogo(){
+      const current=resources;if(!current||current.logoRequested||videoLayout||!enabled||!showing)return;
+      const texture=current.texture;current.logoRequested=true;
+      loadImage('foreground-logo','/assets/FuraticLogo.png',bitmap=>{
+        if(resources!==current||current.texture!==texture||dead||!enabled||!showing||videoLayout)return;
+        gl.bindTexture(gl.TEXTURE_2D,texture);gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL,false);gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,bitmap);current.ready=true;
+      },768);
     }
     function initialize(){
       if(resources||dead||!enabled||!showing)return;
@@ -76,13 +94,11 @@
         for(const shader of shaders)gl.detachShader(program,shader);
         texture=gl.createTexture();vao=gl.createVertexArray();if(!texture||!vao)throw new Error('Foreground allocation failed');
         const at=name=>gl.getUniformLocation(program,name);
-        const current={program,texture,vao,ready:false,resolution:at('u_resolution'),bands:at('u_bands[0]'),scale:at('u_scale'),opacity:at('u_opacity'),logo:at('u_logo'),color:at('u_color'),sampler:at('u_texture')};
+        const current={program,texture,vao,ready:false,logoRequested:false,resolution:at('u_resolution'),bands:at('u_bands[0]'),scale:at('u_scale'),opacity:at('u_opacity'),barHeight:at('u_barHeight'),logo:at('u_logo'),color:at('u_color'),sampler:at('u_texture')};
         resources=current;
         gl.bindTexture(gl.TEXTURE_2D,texture);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);
-        loadImage('foreground-logo','/assets/FuraticLogo.png',bitmap=>{
-          if(resources!==current||dead||!enabled||!showing)return;
-          gl.bindTexture(gl.TEXTURE_2D,texture);gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL,false);gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,bitmap);current.ready=true;
-        },768);
+        gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,1,1,0,gl.RGBA,gl.UNSIGNED_BYTE,new Uint8Array(4));
+        ensureLogo();
       }catch(_error){if(texture)gl.deleteTexture(texture);if(vao)gl.deleteVertexArray(vao);if(program)gl.deleteProgram(program);resources=null;enabled=false;}
       finally{for(const shader of shaders)gl.deleteShader(shader);}
     }
@@ -92,17 +108,21 @@
         desired.set(value.bands);desiredColor.set(value.color);targetScale=clamp(value.logoScale,.7,1);received=performance.now()/1000;
       },
       setEnabled(value){enabled=Boolean(value);},
+      setVideoLayout(value){videoLayout=Boolean(value);},
       visibility(value){showing=Boolean(value);if(!showing){free();bands.fill(0);desired.fill(0);scale=targetScale=.7;}},
       update(dt,now){
         if(dead)return;const fresh=now-received<.3;
         for(let i=0;i<26;i++)bands[i]+=(clamp(fresh?desired[i]:0)-bands[i])*(1-Math.exp(-dt/.022));
         for(let i=0;i<4;i++)color[i]+=((fresh?clamp(desiredColor[i]):i===3?0:1)-color[i])*(1-Math.exp(-dt/.035));
-        scale+=((fresh?targetScale:.7)-scale)*(1-Math.exp(-dt/.035));
+        if(logoAlpha>.003||!videoLayout)scale+=((fresh?targetScale:.7)-scale)*(1-Math.exp(-dt/.035));
+        barHeight+=((videoLayout?.75:1)-barHeight)*(1-Math.exp(-dt/.16));
+        logoAlpha+=((videoLayout?0:1)-logoAlpha)*(1-Math.exp(-dt/.10));
+        if(videoLayout&&logoAlpha<.003){logoAlpha=0;freeLogo();}
         alpha+=((enabled?1:0)-alpha)*(1-Math.exp(-dt/.13));
         if(!enabled&&alpha<.003){alpha=0;if(resources)free();}
       },
       draw(width,height){
-        if(dead||!showing||alpha<=.003)return;initialize();const r=resources;if(!r)return;
+        if(dead||!showing||alpha<=.003)return;initialize();ensureLogo();const r=resources;if(!r)return;
         // Guard the actual visible logo bounds against both the bar peaks and
         // the existing top bar, while retaining the centered 70–100% response.
         const topbar=document.getElementById('obs-topbar');
@@ -112,9 +132,10 @@
         const base=height*.48148148;
         const fitted=Math.max(.1,Math.min(scale,(height*.5-top-16*height/1080)/(.414*base),(barsTop-height*.5-16*height/1080)/(.443*base)));
         gl.useProgram(r.program);gl.bindVertexArray(r.vao);gl.enable(gl.BLEND);gl.blendFuncSeparate(gl.SRC_ALPHA,gl.ONE_MINUS_SRC_ALPHA,gl.ONE,gl.ONE_MINUS_SRC_ALPHA);
-        gl.uniform2f(r.resolution,width,height);gl.uniform1fv(r.bands,bands);gl.uniform1f(r.opacity,alpha);gl.uniform1f(r.scale,fitted);gl.uniform4fv(r.color,color);
+        gl.uniform2f(r.resolution,width,height);gl.uniform1fv(r.bands,bands);gl.uniform1f(r.opacity,alpha);gl.uniform1f(r.barHeight,barHeight);gl.uniform1f(r.scale,fitted);gl.uniform4fv(r.color,color);
+        gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,r.texture);gl.uniform1i(r.sampler,0);
         gl.uniform1i(r.logo,0);gl.drawArraysInstanced(gl.TRIANGLE_STRIP,0,4,26);
-        if(r.ready){gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,r.texture);gl.uniform1i(r.sampler,0);gl.uniform1i(r.logo,1);gl.drawArrays(gl.TRIANGLE_STRIP,0,4);}
+        if(r.ready&&logoAlpha>.003){gl.uniform1f(r.opacity,alpha*logoAlpha);gl.uniform1i(r.logo,1);gl.drawArrays(gl.TRIANGLE_STRIP,0,4);}
         gl.disable(gl.BLEND);gl.bindVertexArray(null);
       },
       dispose(valid=true){if(dead)return;dead=true;free(valid);if(window.FuraticOBSForeground===api)delete window.FuraticOBSForeground;},
@@ -286,6 +307,7 @@
       active=true;eventId=event.eventId;cutoff=expires;results=null;requested='';stage='entering';
       root=document.createElement('div');root.id='obs-showcase';root.className='obs-showcase-root';root.setAttribute('aria-label','Event celebration');document.body.appendChild(root);
       window.FuraticOBSForeground?.setEnabled(false);
+      window.dispatchEvent(new Event('furatic:scenechange'));
       ui.animate(bar,[{opacity:1,transform:'none',filter:'none'},{opacity:0,transform:'translateY(-115%) scale(.985)',filter:'blur(5px)'}],{duration:650,easing:ease});
       pendingTimer=setTimeout(()=>{pendingTimer=0;if(!active)return;ui.suspend();if(showing)showThanks();},680);
       fetchResults();schedule();
@@ -302,6 +324,7 @@
       rows=[];hero=thanks=null;stage='none';results=null;requested='';
       if(!restore)return;
       window.FuraticOBSForeground?.setEnabled(true);ui.resume();
+      window.dispatchEvent(new Event('furatic:scenechange'));
       ui.animate(bar,[{opacity:0,transform:'translateY(-105%)',filter:'blur(5px)'},{opacity:1,transform:'none',filter:'none'}],{duration:700,easing:ease});
     }
     const api={

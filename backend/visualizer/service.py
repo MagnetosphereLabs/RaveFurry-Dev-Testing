@@ -22,6 +22,7 @@ for name in ("OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "OMP_NUM_THREADS"):
 
 from aiohttp import web, WSMsgType
 from .capture import Capture
+from .video import VideoReceiver, install_routes as install_video_routes
 
 MAX_CLIENTS = 4
 PAGE = Path(__file__).with_name("obs-background.html")
@@ -70,6 +71,7 @@ class ParentGuard:
 
 
 def create_app(capture, port):
+    video_receiver = VideoReceiver()
     clients = set()
     overlay = {"version": 1, "updatedAt": 0, "mode": "event", "song": None, "queueEmpty": False, "message": None}
     cover_id, cover_bytes, cover_type = '', b'', 'image/jpeg'
@@ -92,6 +94,7 @@ def create_app(capture, port):
     def foreground_capture():
         event = overlay.get('event')
         finale = overlay['mode'] == 'afterhours' and event and time.time() < event['endedAt']+600
+        video_receiver.presentation(event['endedAt']+600 if finale else 0)
         if hasattr(capture, 'set_foreground_active'):
             capture.set_foreground_active(bool(clients) and not finale)
 
@@ -369,6 +372,7 @@ def create_app(capture, port):
                 await asyncio.wait_for(ws.close(code=1001, message=b"Visualizer stopping"), timeout=.50)
 
     app = web.Application(middlewares=[only_local], client_max_size=2 * 1024 * 1024 + 1)
+    install_video_routes(app, video_receiver, port)
     app.router.add_get("/", page)
     app.router.add_get("/obs-background.html", page)
     app.router.add_get("/obs-topbar.js", notification_script)
