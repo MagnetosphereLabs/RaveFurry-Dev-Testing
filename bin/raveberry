@@ -384,6 +384,9 @@ help        show this help and exit""",
             "threads=160, "
             "connection_limit=450, "
             "channel_timeout=60, "
+            # Keep ample room for moderator blocklist uploads, while rejecting
+            # giant request bodies before Waitress buffers the whole request.
+            "max_request_body_size=int(os.environ.get('FURATIC_MAX_REQUEST_BODY_BYTES', '67108864')), "
             "expose_tracebacks=False"
             ")"
         )
