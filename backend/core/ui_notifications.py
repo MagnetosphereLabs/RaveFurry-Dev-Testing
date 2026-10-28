@@ -111,6 +111,12 @@ def notifications(request: WSGIRequest) -> JsonResponse:
     except (TypeError, ValueError):
         after = 0
 
+    try:
+        sequence = int(redis.connection.get(NOTIFICATION_SEQUENCE_KEY) or 0)
+    except RedisError:
+        sequence = after
+    if sequence < after:
+        after = 0
     identity = user_manager.client_identity(request, create=False)
     items = _recent_after(after, identity.token_hash if identity else "")
     latest = after
@@ -120,6 +126,7 @@ def notifications(request: WSGIRequest) -> JsonResponse:
     return JsonResponse(
         {
             "latest": latest,
+            "sequence": sequence,
             "notifications": items,
         }
     )

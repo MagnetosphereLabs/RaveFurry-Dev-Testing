@@ -1,6 +1,7 @@
 """Reject scanner paths before static-file lookup, sessions or database work."""
 from collections import OrderedDict, deque
 import logging
+import json
 import re
 import threading
 import time
@@ -44,6 +45,8 @@ class RequestGuard:
         self.logins = OrderedDict()
         self.log_window = 0.0
         self.log_count = 0
+        from core.traffic_limits import TrafficLimits
+        self.traffic = TrafficLimits()
 
     @staticmethod
     def _client(environ):
@@ -92,8 +95,42 @@ class RequestGuard:
                                 ("X-Content-Type-Options", "nosniff"), *extra])
         return [body]
 
+    @staticmethod
+    def _rate_reply(environ, start_response):
+        message = ("You've been rate limited because of an extraordinary amount of requests "
+                   "coming from your IP address recently. Please wait a moment, then try again.")
+        api = environ.get("PATH_INFO", "").startswith(("/ajax/", "/api/", "/visualizer/features"))
+        if api:
+            body = json.dumps({"message": message, "retryAfter": 5}).encode()
+            kind = "application/json"
+        else:
+            body = ("<!doctype html><html lang=en><meta charset=utf-8>"
+                    "<meta name=viewport content='width=device-width,initial-scale=1'>"
+                    "<title>Please pause for a moment · FURATIC</title><style>"
+                    "body{margin:0;min-height:100vh;display:grid;place-items:center;background:"
+                    "radial-gradient(at top left,#245752,#271638 65%,#111827);color:#f3f5fa;"
+                    "font:18px/1.6 system-ui}main{max-width:38rem;margin:24px;padding:32px;"
+                    "border:1px solid #ffffff38;border-radius:24px;background:#ffffff12;"
+                    "backdrop-filter:blur(24px)}h1{font-size:1.5rem}a{color:#acdeed}</style>"
+                    "<main><h1>Please pause for a moment</h1><p>" + message +
+                    "</p><a href='/'>Return to FURATIC</a></main></html>").encode()
+            kind = "text/html"
+        start_response("429 Too Many Requests", [("Content-Type", kind + "; charset=utf-8"),
+                       ("Content-Length", str(len(body))), ("Cache-Control", "no-store"),
+                       ("Retry-After", "5"), ("X-Content-Type-Options", "nosniff")])
+        return [body]
+
     def __call__(self, environ, start_response):
         path = environ.get("PATH_INFO", "")
+        from core.traffic_limits import workload
+        # Exact local health probes must remain available during admission pressure.
+        health = path == "/_healthz/" and environ.get("REMOTE_ADDR") in {"127.0.0.1", "::1"}
+        limit = 'ok' if health else self.traffic.check(self._client(environ), workload(path, environ.get("REQUEST_METHOD", "GET")))
+        if limit == 'client':
+            return self._rate_reply(environ, start_response)
+        if limit == 'busy':
+            return self._reply(start_response, "503 Service Unavailable",
+                               "The server is busy. Please try again shortly.", [("Retry-After", "2")])
         reason = suspicious_path(path)
         if reason:
             self._record_probe(environ, reason)

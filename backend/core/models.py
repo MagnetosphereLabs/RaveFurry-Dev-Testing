@@ -50,6 +50,7 @@ class ArchivedSong(models.Model):
     duration = models.FloatField()
     counter = models.IntegerField()
     cached = models.BooleanField()
+    cached_metadata = models.JSONField(default=dict, blank=True)
 
     def __str__(self) -> str:
         return self.title + " (" + self.url + "): " + str(self.counter)
@@ -66,6 +67,8 @@ class ArchivedSong(models.Model):
             "duration": self.duration,
             "external_url": self.url,
             "cached": self.cached,
+            "artwork_url": (self.cached_metadata or {}).get("artwork_url", ""),
+            "genre": (self.cached_metadata or {}).get("genre", ""),
         }
 
     class Meta:
@@ -389,3 +392,24 @@ class AuditEntry(models.Model):
 
     class Meta:
         ordering = ["-created"]
+
+
+
+class IpScreenDecision(models.Model):
+    """Successful IP intelligence results, expiring 30 days after lookup."""
+    ip = models.GenericIPAddressField(primary_key=True)
+    decision = models.JSONField(default=dict)
+    expires_at = models.DateTimeField(db_index=True)
+
+
+class RequestReservation(models.Model):
+    """Capacity reserved before remote lookups; dead requests expire automatically."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    requester_token = models.CharField(max_length=64, db_index=True)
+    expires_at = models.DateTimeField(db_index=True)
+
+
+class RuntimeState(models.Model):
+    """Small durable internal ledgers, written only when their content changes."""
+    key = models.CharField(max_length=100, primary_key=True)
+    value = models.JSONField(default=dict)

@@ -1,8 +1,7 @@
 """Optional, read-only OBS vote achievements, independent of playback/rendering.
 
-The bounded event ledger and announcement cooldowns live on disk, not in Redis
-or a browser tab, so planned web restarts cannot replay achievements. Only the
-small public message file is read by the isolated visualizer companion.
+The bounded event ledger and cooldowns live in PostgreSQL. The isolated
+visualizer companion receives only a public in-memory snapshot over loopback.
 """
 from __future__ import annotations
 
@@ -215,25 +214,41 @@ def _event_marker(now):
 
 def _run():
     from django.conf import settings
-    from django.db import close_old_connections, connections
+    from django.db import close_old_connections, connections, DatabaseError
     from django.utils import timezone
     from core import models, redis, site_mode
-    from core.safe_files import atomic_write_text, OptionalFileStatus
+    from core import obs_state
     from core.settings import storage
 
     directory = Path(settings.BASE_DIR) / "config"
     state_path, message_path = directory / STATE_NAME, directory / MESSAGE_NAME
-    try:
-        raw = state_path.read_text(encoding="utf-8") if state_path.stat().st_size <= 1024 * 1024 else "{}"
-        director = Director(json.loads(raw))
-        # Validate the persisted schema before allowing it to schedule anything.
-        if director.state:
-            for key in ("start", "mode", "plays", "current", "watermarks", "sent", "lastReminder", "active", "pending"):
-                director.state[key]
-    except (OSError, ValueError, KeyError, TypeError):
-        director = Director()
+    while not _stop.is_set():
+        try:
+            try:
+                stored = models.RuntimeState.objects.filter(key='obs-notification-director').first()
+                if stored:
+                    director = Director(stored.value)
+                else:
+                    # Import the previous ledger once so installation does not replay
+                    # achievements. The old files are never written again.
+                    try:
+                        raw = state_path.read_text(encoding='utf-8') if state_path.stat().st_size <= 1024 * 1024 else '{}'
+                        director = Director(json.loads(raw))
+                    except (OSError, ValueError, TypeError):
+                        director = Director()
+                if director.state:
+                    for key in ('start', 'mode', 'plays', 'current', 'watermarks', 'sent', 'lastReminder', 'active', 'pending'):
+                        director.state[key]
+            except (ValueError, KeyError, TypeError):
+                director = Director()
+            break
+        except DatabaseError:
+            connections.close_all()
+            _stop.wait(2)
+    if _stop.is_set():
+        connections.close_all()
+        return
     saved = None
-    file_status = OptionalFileStatus("OBS vote notification file", LOGGER)
     last_error = 0
     fields = ("occurrence_id", "external_url", "artist", "title", "votes")
     try:
@@ -246,7 +261,7 @@ def _run():
                 cutoff = now - datetime.timedelta(hours=24)
                 history = models.PlaybackHistory.objects.filter(ended_at__gte=cutoff).order_by("-ended_at").values(*fields, "started_at")[:MAX_PLAYS]
                 rows = [_row(song, song["started_at"]) for song in history]
-                song = models.CurrentSong.objects.values(*fields, "playback_started_at").first()
+                song = models.CurrentSong.objects.values(*fields, "playback_started_at", "duration", "created", "last_paused", "internal_url", "artwork_url").first()
                 current = _row(song, song["playback_started_at"]) if song and song["playback_started_at"] else None
                 if current:
                     rows.append(current)
@@ -267,16 +282,16 @@ def _run():
                 if serialized != saved:
                     # Commit cooldowns BEFORE publishing. Failure cannot produce
                     # an announcement whose state would be lost at the restart.
-                    atomic_write_text(state_path, serialized, attempts=1)
+                    models.RuntimeState.objects.update_or_create(key='obs-notification-director', defaults={'value': director.state})
                     saved = serialized
-                atomic_write_text(message_path, json.dumps({
-                    "version": 1, "updatedAt": now.timestamp(), "message": message,
-                }, separators=(",", ":"), allow_nan=False), attempts=1)
-                file_status.succeeded()
-            except OSError as error:
-                file_status.failed(error)
+                obs_state.publish(song, mode, message,
+                                  queue_empty=not song and not models.QueuedSong.objects.exists(),
+                                  paused=storage.get('paused'), alarm=redis.get('alarm_playing'),
+                                  backup=redis.get('backup_playing'))
+            except OSError:
+                # The companion can restart independently; publish latest state
+                # on the next tick rather than accumulating a message queue.
                 connections.close_all()
-                director.rebase = True
             except Exception:  # optional overlays must never interrupt music
                 if time.monotonic() - last_error >= 60:
                     LOGGER.exception("OBS vote notifications temporarily unavailable")

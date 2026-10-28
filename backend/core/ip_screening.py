@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import ipaddress
+import datetime
+import threading
 import json
 import logging
 import os
@@ -34,6 +36,9 @@ DAY_USAGE_KEY_PREFIX = "ip-screen:usage:day:"
 MINUTE_USAGE_KEY_PREFIX = "ip-screen:usage:minute:"
 
 DEFAULT_DEFER_TTL_SECONDS = 15 * 60
+PERSISTENT_TTL = 30 * 24 * 60 * 60
+_LOOKUP_LOCKS = [threading.Lock() for _ in range(64)]
+_next_prune = 0.0
 
 _COMPILED_CACHE: Dict[str, Any] = {
     "signature": None,
@@ -122,6 +127,10 @@ def _save_sources(sources: List[Dict[str, Any]]) -> None:
 
 
 def invalidate_blocklist_cache() -> None:
+    # A moderator's changed blocklist takes effect immediately, including for
+    # addresses whose successful API result is stored for a month.
+    for key in redis.connection.scan_iter(match=DECISION_KEY_PREFIX + '*', count=200):
+        redis.connection.delete(key)
     _COMPILED_CACHE["signature"] = None
     _COMPILED_CACHE["sources"] = []
 
@@ -504,6 +513,23 @@ def _defer_key(ip: str) -> str:
 def _load_cached_decision(ip: str) -> Optional[Dict[str, Any]]:
     raw = redis.connection.get(_decision_key(ip))
     if not raw:
+        from core.models import IpScreenDecision
+        from django.utils import timezone
+        global _next_prune
+        if time.monotonic() >= _next_prune:
+            _next_prune = time.monotonic() + 3600
+            IpScreenDecision.objects.filter(expires_at__lte=timezone.now()).delete()
+        row = IpScreenDecision.objects.filter(ip=ip, expires_at__gt=timezone.now()).first()
+        if row:
+            value = row.decision
+            # A changed API policy is re-evaluated instead of using an old verdict.
+            if value.get('_policy') != _policy():
+                return None
+            if not value.get('blocked') and find_matching_blocklist(ip):
+                return None
+            ttl = max(1, int((row.expires_at - timezone.now()).total_seconds()))
+            redis.connection.set(_decision_key(ip), json.dumps(value), ex=ttl)
+            return dict(value)
         return None
 
     try:
@@ -513,10 +539,30 @@ def _load_cached_decision(ip: str) -> Optional[Dict[str, Any]]:
 
     if not isinstance(value, dict):
         return None
+    if value.get('reason') in {'api', 'allow'} and value.get('_policy') != _policy():
+        return None
     return value
 
 
+def _policy():
+    return [str(conf.FURATIC_IP_INTEL_FLAGS), str(conf.FURATIC_IP_INTEL_BLOCK_THRESHOLD)]
+
+
 def _store_decision(ip: str, value: Dict[str, Any], ttl_seconds: int) -> None:
+    # Persist only successful API verdicts, including residential/allow results.
+    # Outages and budget deferrals must never become month-long decisions.
+    global _next_prune
+    if value.get("reason") in {"api", "allow"}:
+        value['_policy'] = _policy()
+        from core.models import IpScreenDecision
+        from django.utils import timezone
+        ttl_seconds = PERSISTENT_TTL
+        IpScreenDecision.objects.update_or_create(ip=ip, defaults={
+            "decision": value, "expires_at": timezone.now() + datetime.timedelta(seconds=ttl_seconds),
+        })
+        if time.monotonic() >= _next_prune:
+            _next_prune = time.monotonic() + 3600
+            IpScreenDecision.objects.filter(expires_at__lte=timezone.now()).delete()
     redis.connection.set(_decision_key(ip), json.dumps(value), ex=ttl_seconds)
 
 
@@ -599,11 +645,11 @@ def get_runtime_state() -> Dict[str, Any]:
         "dailyLimit": snapshot["daily_limit"],
         "minuteUsed": snapshot["minute_used"],
         "minuteLimit": snapshot["minute_limit"],
-        "cacheTtlSeconds": int(conf.FURATIC_IP_SCREEN_CACHE_TTL_SECONDS),
+        "cacheTtlSeconds": PERSISTENT_TTL,
     }
 
 
-def evaluate_ip(ip: str, *, allow_api: bool) -> Dict[str, Any]:
+def _evaluate_ip(ip: str, *, allow_api: bool) -> Dict[str, Any]:
     normalized = _normalize_ipv4(ip)
     if not normalized:
         return {
@@ -769,3 +815,14 @@ def evaluate_ip(ip: str, *, allow_api: bool) -> Dict[str, Any]:
         google_one_vpn,
     )
     return decision
+
+
+
+def evaluate_ip(ip: str, *, allow_api: bool) -> Dict[str, Any]:
+    normalized = _normalize_ipv4(ip)
+    cached = _load_cached_decision(normalized) if normalized else None
+    if cached is not None:
+        return {**cached, "cached": True, "newlyBlocked": False}
+    # Coalesce simultaneous first visits from the same address; bounded locks.
+    with _LOOKUP_LOCKS[hash(normalized) % len(_LOOKUP_LOCKS)]:
+        return _evaluate_ip(normalized, allow_api=allow_api)

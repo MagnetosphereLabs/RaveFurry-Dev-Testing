@@ -101,8 +101,10 @@ class CoreConfig(AppConfig):
                 logging.warning("unable to initialize built-in moderator: %s", exc)
 
             def stop_workers() -> None:
-                from core import obs_export
-                obs_export.stop()
+                from core import obs_state
+                obs_state.stop()
+                from core.musiq import cache_backfill
+                cache_backfill.stop()
                 # wake up the playback thread and stop it
                 redis.put("stop_playback_loop", True)
                 playback.queue_changed.set()

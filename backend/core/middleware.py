@@ -36,6 +36,7 @@ _MODERATOR_RECOVERY_PREFIXES = (
 
 _ALLOWED_PREFIXES = (
     "/afterhours/",
+    "/song-artwork/",
     "/admin/",
     "/moderator/",
     "/moderator-login/",
@@ -152,7 +153,7 @@ class ClientIpBanMiddleware:
         # Public rendering snapshots do not need a database identity lookup.
         # Keep all IP screening and resolve identity for blocked/audited requests.
         features_only = request.method == "GET" and path == "/visualizer/features.json"
-        lightweight = features_only or path in {"/api/site-mode/", "/visualizer/features/"}
+        lightweight = features_only or path.startswith("/song-artwork/") or path in {"/api/site-mode/", "/visualizer/features/"}
         identity = None if lightweight else user_manager.client_identity(request)
         screening = None
 
@@ -207,6 +208,7 @@ class ClientIpBanMiddleware:
             "/ajax/musiq/played-history/", "/api/moderator/state/",
             "/afterhours/top-songs/", "/afterhours/history/",
         }
+        quiet_poll = quiet_poll or path.startswith("/song-artwork/")
         if not quiet_poll or response.status_code >= 400:
             logger.info(
                 "HTTP %s %s %s [%s]",

@@ -68,6 +68,7 @@ def _disable_dynamic_page_cache(response: HttpResponse) -> HttpResponse:
 def _furatic_public_context() -> Dict[str, Any]:
     """Shared public Furatic branding / link context."""
     return {
+        "static_asset_version": _static_asset_version(),
         "furatic_public_url": conf.FURATIC_PUBLIC_URL,
         "furatic_logo_url": conf.FURATIC_LOGO_SQUARE_URL,
         "furatic_logo_wide_url": conf.FURATIC_LOGO_WIDE_URL,

@@ -37,15 +37,16 @@ def analyze_song(queue_key: int) -> None:
     song = models.QueuedSong.objects.filter(id=queue_key).first()
     if not song:
         return
-    if song.artwork_url:
+    from core.musiq import song_cache
+    archived = models.ArchivedSong.objects.filter(url=song.external_url).first()
+    cached = dict(archived.cached_metadata or {}) if archived else {}
+    if archived:
         try:
-            cover = requests.get(song.artwork_url, timeout=8)
-            content_type = cover.headers.get("content-type", "")
-            if cover.ok and content_type.startswith("image/") and len(cover.content) <= 5 * 1024 * 1024:
-                directory = Path(settings.FURATIC_OBS_OUTPUT_DIR).expanduser() / "artwork"
-                directory.mkdir(parents=True, exist_ok=True)
-                (directory / f"queue-{song.id}.jpg").write_bytes(cover.content)
-        except (requests.RequestException, OSError):
+            local_art = song_cache.save_artwork(archived, song.artwork_url or cached.get('artwork_url', ''))
+            if local_art:
+                song_cache.merge(archived, artwork_url=local_art, artwork_source=song.artwork_url if not song.artwork_url.startswith('/') else None)
+                models.QueuedSong.objects.filter(id=queue_key).update(artwork_url=local_art)
+        except (ValueError, OSError):
             pass
     manually_held = (
         song.review_status == "pending"
@@ -56,38 +57,13 @@ def analyze_song(queue_key: int) -> None:
         "review_reason": song.review_reason if manually_held else "",
     }
     try:
-        headers = {"User-Agent": "FURATIC/1.0 (non-commercial event)"}
-        response = requests.get(
-            "https://lrclib.net/api/get",
-            params={
-                "artist_name": song.artist,
-                "track_name": song.title,
-                "duration": round(song.duration),
-            },
-            headers=headers,
-            timeout=8,
-        )
-        if response.status_code == 404:
-            response = requests.get(
-                "https://lrclib.net/api/search",
-                params={"artist_name": song.artist, "track_name": song.title},
-                headers=headers,
-                timeout=8,
-            )
-            response.raise_for_status()
-            candidates = response.json()
-            if not isinstance(candidates, list):
-                candidates = []
-            data = min(
-                candidates,
-                key=lambda item: abs(float(item.get("duration") or 0) - song.duration),
-                default={},
-            )
+        if cached.get('lyrics_status') in {'found', 'missing'}:
+            lyrics = str(cached.get('lyrics') or '')
         else:
-            response.raise_for_status()
-            data = response.json()
-
-        lyrics = str(data.get("plainLyrics") or "")[:100000]
+            from core.musiq.cache_backfill import fetch_lyrics
+            lyrics, lyrics_status = fetch_lyrics(song.artist, song.title, song.duration)
+            if archived:
+                song_cache.merge(archived, lyrics=lyrics, lyrics_status=lyrics_status)
         profanity_count = _count(lyrics, _terms("FURATIC_PROFANITY_TERMS"))
         slur_count = _count(lyrics, _terms("FURATIC_SLUR_TERMS"))
         updates.update(
