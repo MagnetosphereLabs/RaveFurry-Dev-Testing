@@ -12,6 +12,8 @@ from core.musiq.display_name import clean_display_names
 _http = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 _artwork = None
 _artwork_lock = threading.Lock()
+_results = None
+_results_checked = 0.0
 
 
 def start():
@@ -58,9 +60,20 @@ def publish(song, mode, message, *, queue_empty, paused, alarm=False, backup=Fal
         current = {'id': 'alarm' if alarm else 'backup', 'title': 'ALARM!' if alarm else 'Backup Stream',
                    'artist': '', 'votes': 0, 'duration': 0, 'position': 0, 'paused': True, 'artwork': ''}
         video = ''
-    payload = {'version': 1, 'updatedAt': now.timestamp(), 'mode': mode, 'song': current,
+    global _results, _results_checked
+    if mode != 'afterhours':
+        _results = None
+        _results_checked = 0.0
+    elif time.monotonic() - _results_checked >= 5 or _results is None:
+        from core import event_charts
+        _results_checked = time.monotonic()
+        _results = event_charts.obs_data()
+    event = ({key: _results[key] for key in ('eventId', 'endedAt')} if _results else None)
+    payload = {'version': 1, 'updatedAt': now.timestamp(), 'mode': mode, 'song': current, 'event': event,
                'queueEmpty': bool(queue_empty), 'message': message}
     result = _post('/overlay-state', json.dumps(payload, separators=(',', ':'), allow_nan=False).encode())
+    if result and _results and result.get('resultsId') != _results['eventId']:
+        _post('/overlay-results', json.dumps(_results, separators=(',', ':'), allow_nan=False).encode())
     if not result or not video or result.get('artworkId') == video:
         return
     try:

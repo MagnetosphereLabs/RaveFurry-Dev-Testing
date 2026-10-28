@@ -165,7 +165,7 @@ def _capture(active, now):
         row['artwork_url'] = display_artwork(row['external_url'], row['artwork_url'])
         key = row["external_url"] or (artist, title)
         if key not in songs:
-            songs[key] = {"title": title, "artist": artist, "artworkUrl": row["artwork_url"], "externalUrl": row["external_url"], "votes": 0}
+            songs[key] = {"title": title, "artist": artist, "artworkUrl": row["artwork_url"], "externalUrl": row["external_url"], "votes": 0, "duration": float(row["duration"] or 0)}
         songs[key]["votes"] += int(row["votes"] or 0)
         if index >= len(current) and len(history) < 50:
             history.append({"id": str(row["occurrence_id"]), "title": title, "artist": artist, "externalUrl": row["external_url"],
@@ -174,9 +174,31 @@ def _capture(active, now):
                             "outcome": row["outcome"]})
     chart = sorted(songs.values(), key=lambda song: (
         -song["votes"], song["title"].casefold(), song["artist"].casefold(),
-    ))[:20]
+    ))[:50]
     return {"id": active["id"], "startedAt": active["startedAt"], "endedAt": active.get("endedAt"),
-            "songs": chart, "history": history}
+            "songs": [{key: value for key, value in song.items() if key != 'duration'} for song in chart[:20]],
+            "showcaseSongs": chart, "history": history}
+
+
+def obs_data():
+    """A frozen, bounded OBS chart; the website keeps its existing top twenty."""
+    from core.input_validation import youtube_video_id
+    data = _read()
+    if not data or data['active'].get('mode') != 'afterhours' or not data['active'].get('endedAt'):
+        return None
+    active = data['active']
+    event = next((row for row in data['events'] if row['id'] == active['id']), None)
+    if event is None or 'showcaseSongs' not in event:
+        event = _capture(active, _date(active['endedAt']))
+    result = []
+    for song in event.get('showcaseSongs', [])[:50]:
+        try:
+            video = youtube_video_id(song.get('externalUrl', ''))
+        except (ValueError, TypeError):
+            video = ''
+        result.append({'title': song['title'], 'artist': song['artist'], 'votes': int(song['votes']),
+                       'duration': max(0.0, float(song.get('duration') or 0)), 'videoId': video})
+    return {'version': 1, 'eventId': active['id'], 'endedAt': _date(active['endedAt']).timestamp(), 'songs': result}
 
 
 def _put(events, event):
