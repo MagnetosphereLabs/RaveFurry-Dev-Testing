@@ -1,3 +1,4 @@
+import {installSearchPicker} from './search-picker';
 import {
   requestNewMusic,
   requestArchivedMusic,
@@ -14,6 +15,7 @@ import 'jquery-ui/ui/widgets/autocomplete';
 /** Add autocomplete handler.
  */
 export function onReady() {
+  if (installSearchPicker()) return;
   const totalSuggestionCount =
     Number(YOUTUBE_SUGGESTIONS || 0) +
     Number(SPOTIFY_SUGGESTIONS || 0) +

@@ -1,3 +1,4 @@
+import {readPersonalState} from './personal-state';
 import {keyOfElement} from './buttons';
 import {state} from './update';
 import {warningToastWithBar, errorToast} from '../base';
@@ -125,17 +126,10 @@ export function onReady() {
   const awaitingState = new Set<string>();
   function loadPersonalVotes(): Promise<void> {
     if (personalRead) return personalRead;
-    const endpoint = urls['musiq']['own-song-state'];
-    if (!endpoint) return Promise.reject(new Error('Voting is reconnecting. Please try again.'));
-    const abort = new AbortController();
-    const timeout = window.setTimeout(() => abort.abort(), 9000);
-    personalRead = (async () => {
-      const response = await fetch(endpoint, {credentials: 'same-origin', cache: 'no-store', signal: abort.signal});
-      if (!response.ok) throw new Error('Voting is reconnecting. Please try again.');
-      const result = await response.json();
+    personalRead = readPersonalState().then(result => {
       if (!Array.isArray(result.myVotes)) throw new Error('Voting is reconnecting. Please try again.');
       document.dispatchEvent(new CustomEvent('furatic:personal-votes', {detail: result.myVotes}));
-    })().finally(() => { window.clearTimeout(timeout); personalRead = null; });
+    }).finally(() => { personalRead = null; });
     return personalRead;
   }
 

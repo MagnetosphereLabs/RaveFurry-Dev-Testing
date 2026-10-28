@@ -8,8 +8,6 @@ let musicRequestInFlight = false;
 const completedDownloads = new Set<number>();
 const pendingDownloads = new Map<number, {query: string, message: string}>();
 const notificationStartedAt = Date.now() / 1000;
-let notificationCursor = 0;
-let notificationPollRunning = false;
 let notificationPollingStarted = false;
 
 function requestAccepted(response, query) {
@@ -37,19 +35,13 @@ export function reconcileDownloadNotifications() {
   }
 }
 
-async function pollDownloadNotifications() {
-  if (notificationPollRunning || document.hidden || pendingDownloads.size === 0) return;
-  notificationPollRunning = true;
-  const abort = new AbortController();
-  const timeout = window.setTimeout(() => abort.abort(), 9000);
-  try {
-    const response = await fetch('/api/notifications/?after=' + notificationCursor, {credentials: 'same-origin', cache: 'no-store', signal: abort.signal});
-    if (!response.ok) return;
-    const result = await response.json();
-    if (handleModeTransition(result)) return;
-    notificationCursor = Math.max(notificationCursor, Number(result.latest || 0));
-    for (const item of result.notifications || []) {
-      if (!String(item.kind).startsWith('song_request_') || item.createdAt < notificationStartedAt) continue;
+const deliveredNotifications = new Set<string>();
+function receiveDownloadNotifications(items) {
+    for (const item of items) {
+      const deliveryKey = String(item.id) + ':' + String(item.createdAt);
+      if (!String(item.kind).startsWith('song_request_') || item.createdAt < notificationStartedAt || deliveredNotifications.has(deliveryKey)) continue;
+      deliveredNotifications.add(deliveryKey);
+      if (deliveredNotifications.size > 160) deliveredNotifications.delete(deliveredNotifications.values().next().value);
       if (item.kind === 'song_request_ready') {
         const key = Number(item.requestKey);
         pendingDownloads.delete(key);
@@ -64,10 +56,7 @@ async function pollDownloadNotifications() {
         errorToast(item.message, '"' + item.title + '"');
       }
     }
-  } catch (_error) {
-    // Keep the cursor so a temporary connection failure does not lose the result.
-  } finally { window.clearTimeout(timeout); notificationPollRunning = false; }
-}
+ }
 
 /** Finds the song key to a given HTML element.
  * @param {HTMLElement} element an element that is part of a queue entry
@@ -137,20 +126,26 @@ export function showPauseButton() {
 export function requestArchivedMusic(key, query,
     platform = localStorageGet('platform')) {
   infoToast(playlistEnabled() ? 'searching...' : 'Downloading your song…', '"' + query + '"', playlistEnabled() ? 2000 : 0);
-  $.post(urls['musiq']['request-music'],
+  const request = $.ajax({url: urls['musiq']['request-music'], method: 'POST', timeout: 120000, data:
       {
         key: key,
         query: query,
         playlist: playlistEnabled(),
         platform: platform,
-      }).done(function(response) {
+      }}).done(function(response) {
     requestAccepted(response, query);
+    document.dispatchEvent(new CustomEvent('furatic:music-request-accepted'));
   }).fail(function(response) {
     if (handleModeTransition(response.responseJSON)) return;
-    errorToast(response.responseText, '"' + query + '"');
+    errorToast(response.responseJSON?.message || response.responseText || 'We could not confirm that submission. Your queue will keep syncing; check it before trying again.', '"' + query + '"');
+    if (!$('#music-input').val()) $('#music-input').val(query).trigger('change');
+  }).always(function() {
+    document.dispatchEvent(new CustomEvent('furatic:music-request-settled'));
+    (window as any).FuraticNotificationFeed?.refresh();
   });
   $('#music-input').val('').trigger('change');
   disablePlaylistMode();
+  return request;
 }
 
 /** Request a new music item.
@@ -164,21 +159,26 @@ export function requestNewMusic(query, platform = localStorageGet('platform')) {
   musicRequestInFlight = true;
 
   infoToast(playlistEnabled() ? 'searching...' : 'Downloading your song…', '"' + query + '"', playlistEnabled() ? 2000 : 0);
-  $.post(urls['musiq']['request-music'],
+  const request = $.ajax({url: urls['musiq']['request-music'], method: 'POST', timeout: 120000, data:
       {
         query: query,
         playlist: playlistEnabled(),
         platform: platform,
-      }).done(function(response) {
+      }}).done(function(response) {
     requestAccepted(response, query);
+    document.dispatchEvent(new CustomEvent('furatic:music-request-accepted'));
   }).fail(function(response) {
     if (handleModeTransition(response.responseJSON)) return;
-    errorToast(response.responseText, '"' + query + '"');
+    errorToast(response.responseJSON?.message || response.responseText || 'We could not confirm that submission. Your queue will keep syncing; check it before trying again.', '"' + query + '"');
+    if (!$('#music-input').val()) $('#music-input').val(query).trigger('change');
   }).always(function() {
     musicRequestInFlight = false;
+    document.dispatchEvent(new CustomEvent('furatic:music-request-settled'));
+    (window as any).FuraticNotificationFeed?.refresh();
   });
   $('#music-input').val('').trigger('change');
   disablePlaylistMode();
+  return request;
 }
 
 /** Shows a modal with additional information for a song.
@@ -207,8 +207,7 @@ function showTitleModal(element, duration, url) {
 export function onReady() {
   if (!notificationPollingStarted) {
     notificationPollingStarted = true;
-    void pollDownloadNotifications();
-    window.setInterval(pollDownloadNotifications, 2000);
+    (window as any).FuraticNotificationFeed?.subscribe(receiveDownloadNotifications);
   }
   $('#playlist-mode').on('click tap', function(e) {
     if ($(this).hasClass('icon-disabled')) {
@@ -287,6 +286,7 @@ export function onReady() {
   });
   $('#music-input').on('keydown', function(e) {
     if (e.which === 13) {
+      if (e.isDefaultPrevented()) return;
       if (randomKey == null) {
         requestNewMusic($('#music-input').val());
       } else {

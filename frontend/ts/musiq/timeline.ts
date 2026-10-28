@@ -52,7 +52,7 @@ export class HistoryTimeline {
     this.restore(null);
     if (!(window as any).FURATIC_TUTORIAL_PLAYER) {
       this.refresh();
-      this.poll = window.setInterval(() => { if (!document.hidden) this.refresh(); }, 15000);
+      this.poll = window.setInterval(() => { if (!document.hidden) this.refresh(); }, 30000);
     }
   }
 

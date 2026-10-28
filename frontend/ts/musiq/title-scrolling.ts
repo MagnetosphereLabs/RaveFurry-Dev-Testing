@@ -15,7 +15,7 @@ export function syncTitleScrolling() {
     }
   }
   const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-  document.querySelectorAll<HTMLElement>('#current-song-title, #song-queue .queue-title, #auto-song-queue .queue-title, #history-song-queue .queue-title').forEach(title => {
+  document.querySelectorAll<HTMLElement>('#current-song-title, #song-queue .queue-title, #auto-song-queue .queue-title, #history-song-queue .queue-title, #song-search-results .song-search-title, #song-search-results .song-search-artist').forEach(title => {
     let previous = titles.get(title);
     let content = previous?.content || title.querySelector<HTMLElement>(':scope > .furatic-title-content');
     if (!content) {
@@ -59,7 +59,7 @@ function scheduleScrolling() {
 }
 
 function observeTitles() {
-  document.querySelectorAll('#current-song, #song-queue, #auto-song-queue, #history-song-queue').forEach(root => {
+  document.querySelectorAll('#current-song, #song-queue, #auto-song-queue, #history-song-queue, #song-search-results').forEach(root => {
     mutationObserver.observe(root, {childList: true, subtree: true, characterData: true});
   });
   scheduleScrolling();
@@ -73,6 +73,7 @@ export function onReady() {
   mutationObserver = new MutationObserver(scheduleScrolling);
   observeTitles();
   $('#current-song-title').on('change', scheduleScrolling);
+  document.addEventListener('furatic:search-results', observeTitles);
   window.addEventListener('resize', scheduleScrolling);
   window.matchMedia('(prefers-reduced-motion: reduce)').addEventListener?.('change', scheduleScrolling);
   document.fonts?.ready.then(scheduleScrolling);
