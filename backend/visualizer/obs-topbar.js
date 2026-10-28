@@ -10,7 +10,7 @@
   const fields = Object.fromEntries(['title','artist','elapsed','duration','votes'].map(key => [key, document.getElementById('obs-song-' + key)]));
   const noticeFields = Object.fromEntries(['headline','title','artist','detail','footer'].map(key => [key, document.getElementById('vote-notice-' + key)]));
   const ordinal = document.getElementById('vote-notice-ordinal');
-  const texts = new Map(), effects = new Set(), marquees = new Map();
+  const texts = new Map(), effects = new Set(), marquees = new Map(), nodeEffects = new WeakMap();
   const easing = 'cubic-bezier(.22,1,.36,1)';
   const segmenter = typeof Intl.Segmenter === 'function' ? new Intl.Segmenter(undefined, {granularity:'grapheme'}) : null;
   let snapshot = null, received = 0, songId = '', notificationId = '', coverId = '', coverGeneration = 0;
@@ -23,10 +23,19 @@
   const visible = () => !stopped && obsVisible && !document.hidden;
   function animate(node, frames, timing) {
     if (!node.animate) return null;
-    const effect = node.animate(frames, {...timing, fill:'backwards'});
+    nodeEffects.get(node)?.cancel();
+    const effect = node.animate(frames, {...timing, fill:'both'});
+    nodeEffects.set(node,effect);
     effects.add(effect);
-    const release = () => { effects.delete(effect); effect.onfinish = effect.oncancel = null; effect.cancel(); };
-    effect.onfinish = effect.oncancel = release;
+    const release = () => { effects.delete(effect); if(nodeEffects.get(node)===effect)nodeEffects.delete(node); effect.onfinish = effect.oncancel = null; effect.cancel(); };
+    effect.onfinish = () => {
+      // Keep the terminal appearance before releasing the animation. In
+      // particular an outgoing digit must stay invisible until it is removed.
+      const last = frames[frames.length - 1];
+      for (const key of ['opacity', 'transform', 'filter']) if (last[key] !== undefined) node.style[key] = last[key];
+      release();
+    };
+    effect.oncancel = release;
     return effect;
   }
   function marquee(element) {
@@ -68,7 +77,7 @@
           animate(old, [{opacity:1,transform:'translateY(0) scale(1)'},{opacity:0,transform:'translateY(-.28em) scale(.45)'}],{duration:190,easing});
           setTimeout(() => old.remove(), 210);
         }
-        animate(next,[{opacity:0,transform:'translateY(.3em) scale(.5)'},{opacity:1,transform:'translateY(-.025em) scale(1.05)',offset:.78},{opacity:1,transform:'translateY(0) scale(1)'}],{duration:340,easing});
+        animate(next,[{opacity:0,transform:'translateY(.3em) scale(.5)'},{opacity:1,transform:'translateY(-.025em) scale(1.05)',offset:.78},{opacity:1,transform:'translate3d(0,0,0)'}],{duration:340,easing});
       });
       prior.text = text; return;
     }
@@ -89,7 +98,7 @@
       animate(digits ? glyph.firstElementChild : glyph,[
         {opacity:0,transform:'translate(.12em,.38em) rotate(-5deg) scale(.45)',filter:'blur(3px)'},
         {opacity:1,transform:'translate(0,-.025em) rotate(1deg) scale(1.045)',filter:'blur(0px)',offset:.78},
-        {opacity:1,transform:'translate(0,0) rotate(0) scale(1)',filter:'blur(0px)'},
+        {opacity:1,transform:'translate3d(0,0,0)',filter:'none'},
       ], {duration:450,delay:Math.min(index * (digits ? 25 : 16),560),easing});
     });
     element.appendChild(content); texts.set(element,{text,content,digits});
@@ -134,8 +143,9 @@
     for (const key of Object.keys(noticeFields)) typeText(noticeFields[key], next[key] || '');
     animate(notice.querySelector('.vote-notice-content'),[
       {opacity:.3,filter:'blur(5px)',transform:'scale(.985)'},
-      {opacity:1,filter:'blur(0px)',transform:'scale(1)'},
+      {opacity:1,filter:'none',transform:'none'},
     ],{duration:480,easing});
+    fitNotification();
     animate(document.getElementById('vote-notice-badge'),[
       {opacity:.2,transform:'translateY(.2em) scale(.82) rotate(-5deg)'},
       {opacity:1,transform:'translateY(0) scale(1.04) rotate(1deg)',offset:.78},
@@ -162,7 +172,7 @@
     typeText(fields.duration, stamp(song?.duration || 0), true);
     typeText(fields.votes, song ? song.votes + (song.votes === 1 ? ' vote' : ' votes') : '');
     artwork(song?.artwork || '');
-    if (id !== songId) { songId = id; animate(songRoot,[{filter:'blur(3px)'},{filter:'blur(0px)'}],{duration:420,easing}); }
+    if (id !== songId) { songId = id; animate(songRoot,[{filter:'blur(3px)'},{filter:'none'}],{duration:420,easing}); }
     showNotification(value.message,value.mode); tick();
   }
   async function poll() {
@@ -176,6 +186,28 @@
       if (visible()) receive(JSON.parse(body));
     } catch (_) { /* Retain the last coherent view during web/companion recovery. */ }
     finally { clearTimeout(timeout); if (controller === abort) controller = null; if (visible()) timer = setTimeout(poll,2000); }
+  }
+  function fitNotification() {
+    // Measure the incoming labels, never the outgoing animated copies. The
+    // divider follows the content while the song keeps a useful minimum area.
+    const width = element => texts.get(element)?.content.scrollWidth || 0;
+    const box = element => element.offsetWidth;
+    const gap = element => parseFloat(getComputedStyle(element).columnGap) || 0;
+    const header = notice.querySelector('.vote-notice-header');
+    const footer = notice.querySelector('.vote-notice-footer');
+    const song = notice.querySelector('.vote-notice-song');
+    const headerWidth = width(noticeFields.headline) + box(notice.querySelector('.vote-notice-character')) + box(document.getElementById('vote-notice-badge')) + 2*gap(header);
+    const footerWidth = width(noticeFields.footer) + box(notice.querySelector('.vote-notice-url')) + gap(footer);
+    const songWidth = notice.dataset.kind === 'reminder' ? 0 : width(noticeFields.title) + width(noticeFields.artist) + gap(song);
+    const padding = parseFloat(getComputedStyle(notice).paddingLeft) || 0;
+    const required = Math.ceil(Math.max(headerWidth,footerWidth,songWidth,width(noticeFields.detail)) + padding + 3);
+    const unit = Math.min(innerWidth*.017,innerHeight*.03022226);
+    const available = bar.clientWidth - 2*(parseFloat(getComputedStyle(bar).paddingLeft)||0) - unit*.8;
+    const maximum = Math.min(available*.62, available-unit*18);
+    if (available > 0 && required > padding + 3) {
+      const target = Math.max(0,Math.min(required,maximum));
+      if (Math.abs((parseFloat(bar.style.getPropertyValue('--obs-notice-width'))||0)-target) > .5) bar.style.setProperty('--obs-notice-width',target+'px');
+    }
   }
   function matchOriginalNoticeHeight() {
     // Measure a full original achievement card offscreen. This locks the bar
@@ -199,13 +231,17 @@
     footer.style.cssText='display:flex;align-items:baseline;flex-wrap:wrap;gap:'+unit*.3+'px;margin-top:'+unit*.35+'px;padding-top:'+unit*.3+'px;border-top:1px solid transparent';
     footer.querySelector('.vote-notice-url').style.cssText='font:750 '+unit*.86+'px/1.35 system-ui;letter-spacing:-.02em';
     document.body.appendChild(reference);const height=reference.getBoundingClientRect().height;reference.remove();
-    if(height>unit*5&&height<unit*15)bar.style.height=height+'px';
+    if(height>unit*5&&height<unit*15)bar.style.height=(Math.round(height*.9*100)/100)+'px';
+    const style=getComputedStyle(bar);
+    const inside=bar.clientHeight-parseFloat(style.paddingTop||0)-parseFloat(style.paddingBottom||0);
+    if(inside>0)bar.style.setProperty('--obs-cover-size',Math.min(unit*6.7,inside)+'px');
+    fitNotification();
   }
   matchOriginalNoticeHeight();
   window.addEventListener('resize',matchOriginalNoticeHeight);
-  const resize = new ResizeObserver(() => { for (const element of texts.keys()) marquee(element); });
+  const resize = new ResizeObserver(() => { fitNotification(); for (const element of texts.keys()) marquee(element); });
   for (const element of [...Object.values(fields),...Object.values(noticeFields)]) resize.observe(element);
-  document.fonts?.ready.then(() => { for (const element of texts.keys()) marquee(element); });
+  document.fonts?.ready.then(() => { fitNotification(); for (const element of texts.keys()) marquee(element); });
   function visibility() {
     clearTimeout(timer); clearInterval(clock); timer = clock = 0;
     if (!visible()) { controller?.abort(); for (const state of marquees.values()) state.animation?.pause(); return; }
