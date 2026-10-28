@@ -1,4 +1,4 @@
-"""Optional local SRT passthrough. No frame decoding, recording, or transcoding."""
+"""Local SRT reception with bounded independent 720p pictures and PCM audio."""
 from __future__ import annotations
 
 import asyncio
@@ -21,11 +21,10 @@ from urllib.parse import urlencode
 from aiohttp import web, WSMsgType
 
 from .srt_runtime import SRTRuntime, RuntimeSetupError, owns_udp_port
+from .video_frames import FrameStore, MediaSession, read_avi, WIDTH, HEIGHT, FPS
 
 HERE = Path(__file__).parent
-MAX_QUEUE = 8  # At most 512 KiB of encoded data; never decoded video frames.
-MAX_AGE = 1.0
-TRANSPORT_BATCH_SECONDS = .020  # Coalesce TS writes for at most 20 ms; keep every frame.
+MAX_QUEUE = 8  # Compatibility for diagnostics; media uses explicit frame credits.
 
 
 def settings_path():
@@ -152,6 +151,7 @@ class VideoReceiver:
         self.task = None
         self.wake = asyncio.Event()
         self.media = set()
+        self.frames = FrameStore()
         self.observers = set()
         self.signature = None
         self.firewall_task = None
@@ -226,33 +226,39 @@ class VideoReceiver:
 
     def reset_media(self):
         self.generation += 1; self.info = {}; self.last_packet = 0; self.playback_error = ''
-        for queue in tuple(self.media):
-            while not queue.empty(): queue.get_nowait()
-            queue.put_nowait(None)
-        self.media.clear()
-        self.changed()
+        self.frames.clear()
+        for session in tuple(self.media): session.close()
+        self.media.clear(); self.changed()
 
-    def publish(self, data):
-        now = time.monotonic(); self.last_packet = now
-        if self.status != 'receiving': self.status_to('receiving', 'Receiving live video')
-        for queue in tuple(self.media):
-            if queue.full():
-                # Reset an entire slow session; never drop arbitrary TS bytes
-                # into a continuing decoder and never build a replay backlog.
-                while not queue.empty(): queue.get_nowait()
-                queue.put_nowait(None); self.media.discard(queue)
-            else: queue.put_nowait((now, data))
+    def publish_video(self, sequence, data):
+        self.last_packet = time.monotonic()
+        self.frames.publish(sequence, data)
+        if self.status != 'receiving': self.status_to('receiving', 'Receiving live video · bounded 720p / 60 FPS')
+        for session in tuple(self.media): session.changed.set()
+
+    def publish_audio(self, data):
+        for session in tuple(self.media): session.push_audio(data)
 
     def command(self, executable):
         p = self.profile()
         query = urlencode({'mode':'listener','passphrase':p['passphrase'],'pbkeylen':32,
                            'enforced_encryption':1,'latency':p['latency']*1000,'timeout':5000000,'tlpktdrop':1})
+        scale = ('scale=1280:720:force_original_aspect_ratio=decrease:force_divisible_by=2'
+                 ':flags=fast_bilinear:out_color_matrix=bt709:out_range=tv,'
+                 'pad=1280:720:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=60:start_time=0,format=yuv420p')
         return [executable, '-hide_banner', '-nostdin', '-loglevel', 'info',
-                '-analyzeduration', '1000000', '-probesize', '1048576', '-fflags', '+discardcorrupt',
+                '-filter_threads', '1', '-analyzeduration', '1000000', '-probesize', '1048576',
+                '-fflags', '+discardcorrupt', '-hwaccel', 'none', '-threads', '4',
                 '-f', 'mpegts', '-i', f"srt://{p['bind']}:{p['port']}?{query}",
-                '-map', '0:v:0', '-map', '0:a:0?', '-c', 'copy', '-f', 'mpegts',
-                '-mpegts_flags', '+resend_headers', '-pat_period', '0.1', '-muxdelay', '0',
-                '-muxpreload', '0', '-flush_packets', '1', 'pipe:1']
+                '-map', '0:v:0', '-map', '0:a:0?', '-vf', scale,
+                '-c:v', 'libx264', '-threads:v', '2', '-preset', 'ultrafast', '-tune', 'zerolatency',
+                '-profile:v', 'baseline', '-level:v', '3.2', '-pix_fmt', 'yuv420p',
+                '-colorspace', 'bt709', '-color_primaries', 'bt709', '-color_trc', 'bt709', '-color_range', 'tv',
+                '-g', '1', '-bf', '0', '-refs', '1', '-crf', '18', '-maxrate', '12000k', '-bufsize', '12000k',
+                '-x264-params', 'keyint=1:min-keyint=1:scenecut=0:repeat-headers=1:aud=1', '-vtag', 'H264',
+                '-c:a', 'pcm_s16le', '-ac', '2', '-ar', '48000',
+                '-af', 'aresample=async=1:first_pts=0',
+                '-f', 'avi', '-flush_packets', '1', 'pipe:1']
 
     async def start(self):
         self.task = asyncio.create_task(self.run()); self.presentation(self.presentation_until); self.reconcile()
@@ -325,22 +331,11 @@ class VideoReceiver:
                             await asyncio.sleep(.05)
                         self.status_to('error', f"Could not open UDP {self.profile()['port']}. Release the old OBS SRT Media Source and retry.")
                     async def output():
-                        loop = asyncio.get_running_loop()
+                        await read_avi(self.process.stdout, self.publish_video, self.publish_audio)
+                    async def stalled():
                         while True:
-                            try: data = await asyncio.wait_for(self.process.stdout.read(65536), 8)
-                            except asyncio.TimeoutError:
-                                if not self.last_packet: continue  # A listener may wait all night for its first sender.
-                                raise
-                            if not data: return
-                            chunks = [data]; length = len(data); deadline = loop.time()+TRANSPORT_BATCH_SECONDS
-                            while length < 65536:
-                                remaining = deadline-loop.time()
-                                if remaining <= 0: break
-                                try: part = await asyncio.wait_for(self.process.stdout.read(65536-length), remaining)
-                                except asyncio.TimeoutError: break
-                                if not part: break
-                                chunks.append(part); length += len(part)
-                            self.publish(b''.join(chunks))
+                            await asyncio.sleep(2)
+                            if self.last_packet and time.monotonic()-self.last_packet > 10: return
                     async def errors():
                         while True:
                             line = await self.process.stderr.readline()
@@ -350,8 +345,10 @@ class VideoReceiver:
                             if 'Video:' in text:
                                 codec = re.search(r'Video:\s*([\w]+)', text)
                                 size = re.search(r'\b(\d{2,5})x(\d{2,5})\b', text)
-                                if codec: self.info['videoCodec'] = codec.group(1)
-                                if size: self.info.update(width=int(size.group(1)), height=int(size.group(2)))
+                                if codec and 'sourceWidth' not in self.info:
+                                    self.info['videoCodec'] = codec.group(1)
+                                    if size: self.info.update(sourceWidth=int(size.group(1)), sourceHeight=int(size.group(2)))
+                                self.info.update(width=WIDTH, height=HEIGHT, fps=FPS, transport='bounded-h264-pcm16')
                                 self.changed()
                             elif 'Audio:' in text:
                                 codec = re.search(r'Audio:\s*([\w]+)', text)
@@ -365,7 +362,7 @@ class VideoReceiver:
                                 self.status_to('error', 'SRT encryption handshake failed. Check the selected profile password.')
                     tasks = [asyncio.create_task(output()), asyncio.create_task(errors()),
                              asyncio.create_task(self.process.wait()), asyncio.create_task(self.wake.wait()),
-                             asyncio.create_task(listening())]
+                             asyncio.create_task(listening()), asyncio.create_task(stalled())]
                     done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
                     for finished in done:
                         if not finished.cancelled() and finished.exception(): raise finished.exception()
@@ -404,7 +401,9 @@ def install_routes(app, receiver, port):
 
     async def static(request):
         names = {'controls':'video-controls.html', 'video-controls.js':'video-controls.js',
-                 'obs-video.js':'obs-video.js', 'mpegts.min.js':'vendor/mpegts.min.js'}
+                 'obs-video.js':'obs-video.js', 'obs-video-renderer.js':'obs-video-renderer.js',
+                 'obs-video-transport.js':'obs-video-transport.js', 'obs-video-audio.js':'obs-video-audio.js',
+                 'mpegts.min.js':'vendor/mpegts.min.js'}
         name = names[request.match_info['file']]
         return web.FileResponse(HERE/name)
 
@@ -467,27 +466,48 @@ def install_routes(app, receiver, port):
         if not receiver.active: raise web.HTTPConflict(text='Select Video layout and enable the receiver')
         if receiver.media: raise web.HTTPServiceUnavailable(text='The live video is already playing in another display')
         ws = web.WebSocketResponse(heartbeat=15, max_msg_size=1024, compress=False)
-        queue = asyncio.Queue(maxsize=MAX_QUEUE); receiver.media.add(queue); sockets.add(ws)
-        sender = None
+        session = MediaSession(); receiver.media.add(session); sockets.add(ws)
+        tasks = []
         try:
             await ws.prepare(request)
-            async def send():
+            async def pictures():
                 try:
-                    while not ws.closed:
-                        item = await queue.get()
-                        if item is None or time.monotonic()-item[0] > MAX_AGE: break
-                        await asyncio.wait_for(ws.send_bytes(item[1]), .5)
+                    while not session.closed and not ws.closed:
+                        await session.credit.wait()
+                        if session.closed: break
+                        session.changed.clear()
+                        frame = receiver.frames.select(session.last_sent)
+                        if frame is None:
+                            try: await asyncio.wait_for(session.changed.wait(), .010)
+                            except asyncio.TimeoutError: pass
+                            continue
+                        sequence, data = frame
+                        session.inflight = sequence & 0xffffffff; session.last_sent = sequence; session.credit.clear()
+                        await asyncio.wait_for(ws.send_bytes(data), 1)
+                        data = frame = None  # Never retain an old frame while waiting for GPU credit.
                 except (ConnectionError, asyncio.TimeoutError, RuntimeError): pass
                 finally: await ws.close()
-            sender = asyncio.create_task(send())
-            async for msg in ws:
-                if msg.type in (WSMsgType.TEXT, WSMsgType.BINARY): break
+            async def audio():
+                try:
+                    while not session.closed and not ws.closed:
+                        data = await session.audio.get()
+                        if data is None: break
+                        await asyncio.wait_for(ws.send_bytes(data), .5)
+                except (ConnectionError, asyncio.TimeoutError, RuntimeError): pass
+                finally: await ws.close()
+            tasks = [asyncio.create_task(pictures()), asyncio.create_task(audio())]
+            async for message in ws:
+                if message.type != WSMsgType.TEXT: break
+                try:
+                    value = json.loads(message.data)
+                    if not isinstance(value, dict) or set(value) != {'ack'}: break
+                    session.acknowledge(value['ack'])
+                except (ValueError, TypeError): break
         finally:
-            if sender:
-                sender.cancel(); await asyncio.gather(sender, return_exceptions=True)
-            receiver.media.discard(queue); sockets.discard(ws)
-            while not queue.empty(): queue.get_nowait()
-            await ws.close()
+            session.close()
+            for task in tasks: task.cancel()
+            if tasks: await asyncio.gather(*tasks, return_exceptions=True)
+            receiver.media.discard(session); sockets.discard(ws); await ws.close()
         return ws
 
     async def firewall(request):
@@ -531,7 +551,7 @@ def install_routes(app, receiver, port):
         for ws in tuple(sockets):
             with contextlib.suppress(Exception): await asyncio.wait_for(ws.close(code=1001), .5)
 
-    app.router.add_get(r'/{file:controls|video-controls\.js|obs-video\.js|mpegts\.min\.js}', static)
+    app.router.add_get(r'/{file:controls|video-controls\.js|obs-video\.js|obs-video-renderer\.js|obs-video-transport\.js|obs-video-audio\.js|mpegts\.min\.js}', static)
     app.router.add_get('/video/state', state)
     app.router.add_post('/video/settings', update)
     app.router.add_post('/video/playback', playback)

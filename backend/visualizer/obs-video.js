@@ -1,4 +1,4 @@
-/* One local passthrough player; no video frames are copied into the cloud canvas. */
+/* A bounded 720p GPU decoder, drawn under the existing scene GPU fence. */
 (() => {
   'use strict';
   const port=Number(new URLSearchParams(location.search).get('port')||location.port||8766);
@@ -6,12 +6,13 @@
   const origin='http://127.0.0.1:'+port, socketOrigin='ws://127.0.0.1:'+port;
   const ease='cubic-bezier(.22,1,.36,1)',clamp=(n,a,b)=>Math.max(a,Math.min(b,n));
   let state=null,token='',stopped=false,obsVisible=true,shown=false,root=null,surface=null,status=null;
-  let video=null,player=null,socket=null,fetcher=null,library=null,libraryScript=null;
+  let player=null,socket=null,fetcher=null,library=null,libraryScript=null;
   let generation=0,inputGeneration=-1,retry=0,reconnect=0,watch=0,retire=0,moveFrame=0;
   let effects=new Set(),drag=null,geometry=null,ratio=16/9,lastTime=0,lastProgress=0;
   let clientRetry=0,playerRetire=0,failures=0,loadTicket=0,blockedGeneration=-1;
   let leaseAbort=null,leaseRelease=null,leaseSupported=Boolean(navigator.locks?.request),leaseOwned=!leaseSupported,excessBuffer=0;
-  let opaqueRect=null,pictureVisible=false;
+  let opaqueRect=null,pictureVisible=false,displayRect=null,revealAt=0,exitAt=0;
+  const crop=new Float32Array([0,0,1,1]);
   const visible=()=>obsVisible&&!document.hidden;
   const active=()=>!stopped&&visible()&&state?.layout==='video'&&state.enabled&&!state.suspended&&!window.FuraticOBSPresentation?.active;
   function animate(node,frames,duration=550){
@@ -29,21 +30,8 @@
   }
   function teardownPlayer(clearRetry=true){
     ++generation;if(clearRetry){clearTimeout(clientRetry);clientRetry=0;}clearTimeout(playerRetire);playerRetire=0;clearInterval(watch);watch=0;
-    const old=player,element=video;player=video=null;excessBuffer=0;pictureVisible=false;
-    if(element){element.onplaying=element.onloadedmetadata=element.onerror=null;try{element.pause();}catch(_){}}
-    if(old){
-      // Pinned mpegts.js 1.8.2 normally waits for a worker acknowledgment.
-      // Capture ownership before unload clears it; teardown must finish even
-      // when that worker is delayed. The vendored patch retains its handler.
-      const engine=old._player_engine,owner=engine?._transmuxer||engine,worker=owner?._worker,mse=engine?._mse_controller;
-      // Each release is independent: one driver/MSE exception must not skip
-      // detaching the decoder, destroying its worker or revoking media URLs.
-      for(const method of ['pause','unload','detachMediaElement','destroy'])try{old[method]?.();}catch(_){}
-      if(mse){try{mse.shutdown?.();}catch(_){}try{mse.revokeObjectURL?.();}catch(_){}}
-      if(worker){try{if(owner._furaticWorkerHandler)worker.removeEventListener('message',owner._furaticWorkerHandler);}catch(_){}try{worker.terminate();}catch(_){}try{if(worker.objectURL)URL.revokeObjectURL(worker.objectURL);}catch(_){}owner._worker=null;owner._furaticWorkerHandler=null;}
-    }
-    if(element){try{element.srcObject=null;element.removeAttribute('src');element.load();}catch(_){}element.remove();}
-    lastTime=lastProgress=0;
+    const old=player;player=null;pictureVisible=false;revealAt=exitAt=0;
+    old?.close();lastTime=lastProgress=0;
   }
   function releaseLease(){leaseAbort?.abort();leaseAbort=null;const release=leaseRelease;leaseRelease=null;if(leaseSupported)leaseOwned=false;release?.();}
   function acquireLease(){
@@ -70,6 +58,7 @@
     const height=width/ratio;
     const x=clamp((value?.x??.5)*w,width/2,w-width/2),y=clamp((value?.y??.5)*h,height/2,h-height/2);
     root.style.left=x+'px';root.style.top=y+'px';root.style.width=width+'px';root.style.height=height+'px';
+    displayRect={left:x-width/2,top:y-height/2,width,height};
     // Inset beyond the rounded corners/border: only completely covered pixels
     // can be omitted by the background renderer. No DOM reads in its frame loop.
     const inset=22;
@@ -117,7 +106,7 @@
     root.innerHTML='<div class="obs-video-surface"><div class="obs-video-status" role="status">Waiting for video…</div></div>'+['n','s','e','w','ne','nw','se','sw'].map(edge=>'<div class="obs-video-handle" data-edge="'+edge+'"></div>').join('');
     surface=root.querySelector('.obs-video-surface');status=root.querySelector('.obs-video-status');
     root.addEventListener('pointerdown',event=>{
-      if(state?.locked||event.button!==0||!active())return;event.preventDefault();
+      player?.resume();if(state?.locked||event.button!==0||!active())return;event.preventDefault();
       const b=root.getBoundingClientRect();drag={id:event.pointerId,mx:event.clientX,my:event.clientY,x:b.left+b.width/2,y:b.top+b.height/2,width:b.width,edge:event.target.dataset.edge||''};
       try{root.setPointerCapture(event.pointerId);}catch(_){}
     });
@@ -135,72 +124,39 @@
     if(!root){teardownPlayer();releaseLease();return;}
     if(immediate){removeRoot();return;}
     if(retire)return;
-    try{player?.pause();}catch(_){}
+    exitAt=performance.now();player?.audio(0,true);
     animate(surface,[{opacity:1,transform:'none'},{opacity:0,transform:'translateY(12px) scale(.94)'}],400);
     surface.style.opacity='0';retire=setTimeout(removeRoot,420);
   }
   function loadLibrary(){
-    if(window.mpegts)return Promise.resolve(window.mpegts);
+    if(window.FuraticOBSCreateVideoRenderer)return Promise.resolve(window.FuraticOBSCreateVideoRenderer);
     if(library)return library;
     library=new Promise((resolve,reject)=>{
-      const script=libraryScript=document.createElement('script');script.src=origin+'/mpegts.min.js';
-      script.onload=()=>{script.onload=script.onerror=null;window.mpegts?resolve(window.mpegts):reject(new Error('Player unavailable'));};
+      const script=libraryScript=document.createElement('script');script.src=origin+'/obs-video-renderer.js?v=1';
+      script.onload=()=>{script.onload=script.onerror=null;window.FuraticOBSCreateVideoRenderer?resolve(window.FuraticOBSCreateVideoRenderer):reject(new Error('Player unavailable'));};
       script.onerror=()=>{script.onload=script.onerror=null;script.remove();libraryScript=null;library=null;reject(new Error('Player unavailable'));};
       document.head.appendChild(script);
     });return library;
   }
   function reconnectPlayer(message){
     if(!active()||clientRetry)return;
-    clearInterval(watch);watch=0;
-    if(video){try{player?.pause();}catch(_){}video.style.opacity='0';animate(video,[{opacity:1,transform:'scale(1)'},{opacity:0,transform:'scale(.98)'}],250);playerRetire=setTimeout(()=>teardownPlayer(false),270);}
-    else teardownPlayer();
-    showStatus(message||'Reconnecting…');
+    // A lost connection retires one fixed renderer. A slow GPU does not call
+    // this path: it simply withholds frame credit and keeps the newest frame.
+    teardownPlayer();showStatus(message||'Reconnecting…');
     const ticket=++loadTicket;
     if(state.status==='receiving')clientRetry=setTimeout(()=>{clientRetry=0;if(ticket===loadTicket&&active())startPlayer();},Math.min(10000,500*2**Math.min(failures++,5)));
   }
   async function startPlayer(){
-    if(!active()||!leaseOwned||state.status!=='receiving'||player||clientRetry||blockedGeneration===state.generation)return;const ticket=++loadTicket;
+    if(!active()||!leaseOwned||state.status!=='receiving'||player||clientRetry)return;const ticket=++loadTicket;
     try{
-      const m=await loadLibrary();if(stopped||ticket!==loadTicket||!active())return;
-      if(m.LoggingControl)m.LoggingControl.enableAll=false;
-      if(!m.isSupported()){showStatus('Video playback is unavailable in this OBS browser');return;}
-      teardownPlayer();const current=++generation;let pictureShown=false;
-      video=document.createElement('video');video.autoplay=true;video.playsInline=true;video.controls=false;video.preload='none';
-      video.muted=state.muted;video.volume=state.volume;video.style.opacity='0';surface.prepend(video);
-      video.onloadedmetadata=()=>{if(current!==generation||!video)return;if(video.videoWidth&&video.videoHeight){ratio=video.videoWidth/video.videoHeight;applyGeometry();}};
-      video.onplaying=()=>{
-        if(current!==generation||!video)return;failures=0;showStatus('');lastProgress=performance.now();lastTime=video.currentTime;
-        if(!pictureShown){pictureShown=pictureVisible=true;feedback('');video.style.opacity='1';animate(video,[{opacity:0,transform:'scale(.97)'},{opacity:1,transform:'none'}],500);}
-      };
-      video.onerror=()=>{if(current===generation)reconnectPlayer('Reconnecting…');};
-      player=m.createPlayer({type:'mpegts',isLive:true,url:socketOrigin+'/video/live'},{enableWorker:true,enableWorkerForMSE:false,enableStashBuffer:true,stashInitialSize:64,lazyLoad:false,
-        // No continual seeking or accelerated playback: both can make a busy
-        // decoder repeatedly decode ahead instead of presenting steady 60 FPS.
-        liveBufferLatencyChasing:false,liveSync:false,
-        // Keep compressed history behind the active GOP. Removing up to only
-        // one second behind playback can also evict the frames it depends on.
-        autoCleanupSourceBuffer:true,autoCleanupMaxBackwardDuration:8,autoCleanupMinBackwardDuration:4,
-        statisticsInfoReportInterval:2000,fixAudioTimestampGap:false});
-      player.on(m.Events.ERROR,(_type,detail)=>{
-        if(current!==generation)return;
-        if(/unsupported/i.test(String(detail))){blockedGeneration=state.generation;teardownPlayer();showStatus('Video format is not supported by this OBS browser');feedback('The incoming format is not supported by this OBS browser. No transcoding was started.');}
-        else reconnectPlayer('Reconnecting…');
-      });
-      player.on(m.Events.LOADING_COMPLETE,()=>{if(current===generation)reconnectPlayer('Waiting for video…');});
-      player.attachMediaElement(video);player.load();const playing=player.play();playing?.catch?.(()=>{if(current===generation)reconnectPlayer('Starting video…');});
-      lastProgress=performance.now();lastTime=0;
-      watch=setInterval(()=>{
-        if(current!==generation||!active()||!video)return;
-        if(Math.abs(video.currentTime-lastTime)>.01){lastProgress=performance.now();lastTime=video.currentTime;}
-        if(performance.now()-lastProgress>10000){reconnectPlayer(state.status==='receiving'?'Reloading live video…':'Waiting for video…');return;}
-        // One bounded recovery after a sustained backlog, never a seek on
-        // every buffer update. This releases the old decoder before retrying.
-        try{const b=video.buffered,lead=b.length?b.end(b.length-1)-video.currentTime:0;
-          excessBuffer=lead>6?excessBuffer+1:0;
-          if(excessBuffer>=3)reconnectPlayer('Resuming live video…');
-        }catch(_){}
-      },1000);
-    }catch(_){if(ticket===loadTicket&&active())reconnectPlayer('Loading video player…');}
+      const create=await loadLibrary();if(stopped||ticket!==loadTicket||!active())return;
+      teardownPlayer();const current=++generation;
+      player=create({origin,url:socketOrigin+'/video/live',volume:state.volume,muted:state.muted,
+        onFrame(){if(current!==generation||!active())return;failures=0;showStatus('');
+          if(!pictureVisible){pictureVisible=true;revealAt=performance.now();feedback('');}},
+        onError(message,fatal=false){if(current!==generation)return;if(fatal){blockedGeneration=state.generation;teardownPlayer();showStatus(message);feedback(String(message).slice(0,160));}else reconnectPlayer(message);}});
+      await player.start();
+    }catch(_){if(ticket===loadTicket&&active())reconnectPlayer('Loading video and audio…');}
   }
   function sync(){
     if(stopped||!state)return;
@@ -211,12 +167,15 @@
     shown=true;mount();
     acquireLease();if(!leaseOwned)return;
     if(!drag){geometry=state.geometry;applyGeometry();}
-    if(video){video.muted=state.muted;video.volume=state.volume;}
+    player?.audio(state.volume,state.muted);
+    const media=state.media||{},sw=media.sourceWidth,sh=media.sourceHeight;
+    if(sw>0&&sh>0){ratio=sw/sh;const scale=Math.min(1280/sw,720/sh),cw=Math.floor(sw*scale/2)*2,ch=Math.floor(sh*scale/2)*2;
+      crop.set([Math.floor((1280-cw)/4)*2/1280,Math.floor((720-ch)/4)*2/720,cw/1280,ch/720]);if(!drag)applyGeometry();}
     if(state.generation!==inputGeneration){inputGeneration=state.generation;teardownPlayer();++loadTicket;}
-    if(blockedGeneration===state.generation){showStatus('Video format is not supported by this OBS browser');return;}
+    if(blockedGeneration===state.generation)return;
     if(state.status!=='receiving'&&player&&!playerRetire)reconnectPlayer(state.status==='error'?state.detail:'Reconnecting…');
     if(state.status==='error')showStatus(state.detail);
-    else if(!video||video.readyState<2)showStatus(state.status==='receiving'?'Loading video…':state.status==='reconnecting'?'Reconnecting…':'Waiting for video…');
+    else if(!pictureVisible)showStatus(state.status==='receiving'?'Loading video…':state.status==='reconnecting'?'Reconnecting…':'Waiting for video…');
     if(state.status==='receiving'&&!player&&!clientRetry)startPlayer();
   }
   function receive(value){
@@ -248,7 +207,17 @@
   function resize(){if(root&&!drag)applyGeometry();}
   function scene(){sync();}
   window.FuraticOBSVideo={get active(){return shown;},get layout(){return state?.layout||'default';},
-    get opaqueRect(){return active()&&shown&&pictureVisible&&video?.style.opacity==='1'&&!effects.size?opaqueRect:null;}};
+    get opaqueRect(){return active()&&shown&&pictureVisible&&!effects.size&&!exitAt&&performance.now()-revealAt>=500?opaqueRect:null;},
+    get stats(){return player?.stats||null;},
+    draw(gl,w,h){
+      if(!player||!displayRect||(!active()&&!retire))return;
+      const now=performance.now(),enter=revealAt?clamp((now-revealAt)/500,0,1):0,leave=exitAt?clamp((now-exitAt)/400,0,1):0;
+      const eased=1-Math.pow(1-enter,3),out=1-Math.pow(1-leave,3),scale=(.97+.03*eased)*(1-.06*out);
+      const sx=w/Math.max(1,innerWidth),sy=h/Math.max(1,innerHeight),r=displayRect;
+      const rect=[(r.left+r.width*(1-scale)*.5)*sx,(r.top+r.height*(1-scale)*.5+12*out)*sy,r.width*scale*sx,r.height*scale*sy];
+      try{player.draw(gl,w,h,rect,crop,eased*(1-out));}catch(_){reconnectPlayer('Video graphics recovering…');}
+    },
+    complete(){player?.complete();},graphicsLost(valid=false){player?.graphicsLost(valid);}};
   window.addEventListener('obsSourceVisibleChanged',visibility);document.addEventListener('visibilitychange',visibility);
   window.addEventListener('resize',resize);window.addEventListener('blur',endDrag);window.addEventListener('furatic:scenechange',scene);
   window.addEventListener('pagehide',()=>{

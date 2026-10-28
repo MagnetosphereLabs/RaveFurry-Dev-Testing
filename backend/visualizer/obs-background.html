@@ -504,7 +504,7 @@ canvas{display:block;width:100%;height:100%}
     finally{if(vertex)gl.deleteShader(vertex);if(pixel)gl.deleteShader(pixel);}
   }
   function freeFence(){if(gpuFence){gl.deleteSync(gpuFence);gpuFence=null;}}
-  function freeGPU(){foreground?.dispose();foreground=null;freeFence();for(const p of programs)gl.deleteProgram(p);programs=[];if(buffer)gl.deleteBuffer(buffer);buffer=null;}
+  function freeGPU(){window.FuraticOBSVideo?.graphicsLost(true);foreground?.dispose();foreground=null;freeFence();for(const p of programs)gl.deleteProgram(p);programs=[];if(buffer)gl.deleteBuffer(buffer);buffer=null;}
   function gpuReady(){
     if(!gpuFence)return true;
     // Timeout zero: test completion without blocking JavaScript or OBS.
@@ -512,7 +512,7 @@ canvas{display:block;width:100%;height:100%}
     if(result===gl.TIMEOUT_EXPIRED)return false;
     if(result===gl.WAIT_FAILED){if(gl.isContextLost())return false;throw new Error('GPU completion check failed');}
     if(result!==gl.ALREADY_SIGNALED&&result!==gl.CONDITION_SATISFIED)throw new Error('Unexpected GPU completion state');
-    freeFence();return true;
+    freeFence();window.FuraticOBSVideo?.complete();return true;
   }
   function resize(){
     const cssW=Math.max(1,canvas.clientWidth),cssH=Math.max(1,canvas.clientHeight);
@@ -1357,6 +1357,7 @@ canvas{display:block;width:100%;height:100%}
     gl.uniform4fv(loc.edgeEnergy,edgeEnergy);gl.uniform4fv(loc.edgeLights,edgeLights);gl.uniform4fv(loc.edgeMusic,edgeMusic);gl.uniform1fv(loc.edgeBands,edgeBands);
     drawClouds();
     try{foreground?.draw(w,h);}catch(_error){foreground?.dispose();foreground=null;gl.disable(gl.BLEND);gl.bindVertexArray(null);}
+    window.FuraticOBSVideo?.draw(gl,w,h);
     gpuFence=gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE,0);
     if(!gpuFence)throw new Error('GPU fence allocation failed');
     gl.flush();rendered++;
@@ -1400,7 +1401,7 @@ canvas{display:block;width:100%;height:100%}
   let observer;
   try{initialize();observer=new ResizeObserver(()=>{resizePending=true;});observer.observe(canvas);}
   catch(error){freeGPU();report('Graphics initialization failed: '+error.message,true);return;}
-  canvas.addEventListener('webglcontextlost',event=>{if(stopped)return;event.preventDefault();lost=true;foreground?.dispose(false);foreground=null;gpuFence=null;cancelAnimationFrame(raf);raf=0;report('Graphics context recovering',true);});
+  canvas.addEventListener('webglcontextlost',event=>{if(stopped)return;event.preventDefault();lost=true;window.FuraticOBSVideo?.graphicsLost(false);foreground?.dispose(false);foreground=null;gpuFence=null;cancelAnimationFrame(raf);raf=0;report('Graphics context recovering',true);});
   canvas.addEventListener('webglcontextrestored',()=>{if(stopped||!lost)return;try{initialize();lost=false;lastFrame=0;nextRender=0;report('Graphics recovered');if(visible)raf=requestAnimationFrame(frame);}catch(error){freeGPU();lost=false;report('Graphics recovery failed',true);cleanup();}});
   window.addEventListener('pagehide',cleanup,{once:true});
   window.addEventListener('obsSourceVisibleChanged',obsVisibility);document.addEventListener('visibilitychange',setVisibility);
@@ -1408,6 +1409,6 @@ canvas{display:block;width:100%;height:100%}
 })();
 </script>
 <script src="obs-topbar.js?v=2" defer></script>
-<script src="obs-video.js?v=2" defer></script>
+<script src="obs-video.js?v=3" defer></script>
 </body>
 </html>

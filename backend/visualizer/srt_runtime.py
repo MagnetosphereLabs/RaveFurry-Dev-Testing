@@ -54,6 +54,20 @@ async def supports_srt(executable):
         if process: await reap(process)
 
 
+async def supports_encoder(executable):
+    """The bounded 720p transport requires x264, not just an SRT listener."""
+    process = None
+    try:
+        process = await asyncio.create_subprocess_exec(str(executable), '-hide_banner', '-encoders',
+            stdin=subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE, stderr=subprocess.DEVNULL,
+            creationflags=subprocess.CREATE_NO_WINDOW if WINDOWS else 0)
+        output, _ = await asyncio.wait_for(process.communicate(), 8)
+        return process.returncode == 0 and any(len(line.split()) > 1 and line.split()[1] == b'libx264' for line in output.splitlines())
+    except (OSError, asyncio.TimeoutError): return False
+    finally:
+        if process: await reap(process)
+
+
 class SRTRuntime:
     def __init__(self, folder):
         self.folder = Path(folder) / 'srt-runtime'
@@ -80,7 +94,7 @@ class SRTRuntime:
         except OSError: return False
         previous = self.checked.get(path)
         if previous and previous[0] == signature: return previous[1]
-        supported = await supports_srt(path)
+        supported = await supports_srt(path) and await supports_encoder(path)
         self.checked[path] = (signature, supported)
         return supported
 
@@ -91,7 +105,7 @@ class SRTRuntime:
                     self.executable = path
                     return path
             if not WINDOWS:
-                raise RuntimeSetupError('No SRT-capable FFmpeg was found. Install FFmpeg with the srt input protocol, then retry.')
+                raise RuntimeSetupError('No FFmpeg with SRT and H.264 encoder support was found. Install an SRT-enabled GPL FFmpeg build, then retry.')
             progress('Preparing receiver — downloading SRT support…')
             return await self.download(progress)
 
@@ -122,7 +136,7 @@ class SRTRuntime:
                 progress('Preparing receiver — verifying SRT support…')
                 await self.unpack(archive, stage)
                 executable = stage/'ffmpeg.exe'
-                if not await supports_srt(executable):
+                if not await supports_srt(executable) or not await supports_encoder(executable):
                     raise RuntimeSetupError('The downloaded receiver could not run with SRT support on this PC.')
                 # Publish only a fully extracted and tested executable. Preserve notices.
                 for name in ('LICENSE', 'README.txt'):

@@ -1,0 +1,98 @@
+"""Bounded independent H.264 frames and PCM; explicit client frame credit."""
+import asyncio
+from collections import deque
+import struct
+import time
+
+WIDTH, HEIGHT, FPS = 1280, 720, 60
+FRAME_BYTES = WIDTH * HEIGHT * 3 // 2
+MAX_FRAME_BYTES = 2 * 1024 * 1024
+HEADER = struct.Struct('<4sB3xIQ')
+VIDEO, AUDIO = 1, 2
+VIDEO_DELAY = .250  # Match the audio worklet's small jitter buffer.
+FRAME_HISTORY = 32  # Fixed encoded-picture history in system RAM; never GPU surfaces.
+AUDIO_QUEUE = 16
+
+
+def packet(kind, sequence, stamp, data):
+    return HEADER.pack(b'FUV2', kind, sequence & 0xffffffff, stamp) + data
+
+
+class MediaSession:
+    def __init__(self):
+        self.changed = asyncio.Event()
+        self.credit = asyncio.Event(); self.credit.set()
+        self.audio = asyncio.Queue(maxsize=AUDIO_QUEUE)
+        self.inflight = None
+        self.last_sent = -1
+        self.closed = False
+
+    def acknowledge(self, sequence):
+        if type(sequence) is int and sequence == self.inflight:
+            self.inflight = None; self.credit.set()
+
+    def push_audio(self, data):
+        if self.audio.full(): self.audio.get_nowait()
+        self.audio.put_nowait(data)
+
+    def close(self):
+        self.closed = True; self.inflight = None
+        self.changed.set(); self.credit.set()
+        while not self.audio.empty(): self.audio.get_nowait()
+        self.audio.put_nowait(None)
+
+
+class FrameStore:
+    def __init__(self):
+        self.frames = deque(maxlen=FRAME_HISTORY)
+        self.epoch = None
+
+    def clear(self): self.frames.clear(); self.epoch = None
+
+    def publish(self, sequence, data):
+        now = time.monotonic()
+        offset = now-sequence/FPS
+        self.epoch = offset if self.epoch is None else min(self.epoch, offset)
+        self.frames.append((now, sequence, data))
+
+    def select(self, after):
+        deadline = time.monotonic()-VIDEO_DELAY
+        for received, sequence, data in reversed(self.frames):
+            # FFmpeg may write several independent frames in one pipe burst. Their
+            # frame times, rather than identical arrival times, pace delivery.
+            if self.epoch+sequence/FPS <= deadline and sequence > after: return sequence, data
+        return None
+
+
+async def read_avi(reader, on_video, on_audio):
+    """Read our fixed intra-H.264/PCM AVI pipe; no external AVI input parser."""
+    header = await reader.readexactly(12)
+    if header[:4] != b'RIFF' or header[8:] != b'AVI ': raise ValueError('Invalid decoder pipe header')
+    video_sequence = audio_sequence = audio_samples = 0
+    in_media = False
+    while True:
+        try: chunk = await reader.readexactly(8)
+        except asyncio.IncompleteReadError as error:
+            if error.partial: raise ValueError('Incomplete decoder pipe') from error
+            return
+        tag, length = chunk[:4], int.from_bytes(chunk[4:], 'little')
+        if tag in (b'LIST', b'RIFF'):
+            kind = await reader.readexactly(4)
+            if kind in (b'movi', b'rec ', b'AVIX'): in_media = True; continue
+            length -= 4
+            if not 0 <= length <= 1024*1024: raise ValueError('Invalid decoder header size')
+            await reader.readexactly(length + (length & 1)); continue
+        if in_media and tag in (b'00dc', b'00db'):
+            video_sequence += 1
+            if length == 0: continue  # AVI may mark a duplicated slot with an empty chunk.
+            if not 4 <= length <= MAX_FRAME_BYTES: raise ValueError('Video frame exceeded its transport bound')
+            data = await reader.readexactly(length)
+            on_video(video_sequence, packet(VIDEO, video_sequence, video_sequence*1000000//FPS, data))
+        elif in_media and tag == b'01wb':
+            if length > 65536 or length % 4: raise ValueError('Invalid decoded audio packet')
+            data = await reader.readexactly(length); audio_sequence += 1
+            on_audio(packet(AUDIO, audio_sequence, audio_samples, data)); audio_samples += length//4
+        else:
+            if length > 1024*1024: raise ValueError('Decoder pipe chunk exceeded its bound')
+            await reader.readexactly(length)
+        if length & 1: await reader.readexactly(1)
