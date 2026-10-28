@@ -1,6 +1,6 @@
 import {getState, reconnect} from './base.js';
 
-const STATE_POLL_INTERVAL_MS = 2000;
+const STATE_POLL_INTERVAL_MS = 4000;
 
 let shuttingDown = false;
 let pollTimer: number | null = null;

@@ -446,7 +446,7 @@ export function handleUpdateBanner() {
     localStorageSet('ignore-updates', '', 365);
     $('#update-banner').slideUp('fast');
   });
-  if (ADMIN) {
+  if (ADMIN && urls['upgrade-available']) {
     if (localStorageGet('ignore-updates') === null) {
       $.get(urls['upgrade-available']).done(function(response) {
         if (response) {
