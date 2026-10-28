@@ -5,6 +5,7 @@
   if (!bar) return;
   const notice = document.getElementById('vote-notice');
   const mascot = notice.querySelector('.vote-notice-character');
+  const mascotSource = mascot?.getAttribute('src') || '';
   // Fill the PNG's transparent margins without changing its layout box/gaps.
   if (mascot) { mascot.style.transform = 'scale(1.5)'; mascot.style.transformOrigin = 'center'; }
   const songRoot = document.getElementById('obs-song');
@@ -21,6 +22,7 @@
   const segmenter = typeof Intl.Segmenter === 'function' ? new Intl.Segmenter(undefined, {granularity:'grapheme'}) : null;
   let snapshot = null, received = 0, songId = '', notificationId = '', coverId = '', coverGeneration = 0;
   let timer = 0, clock = 0, controller = null, stopped = false, obsVisible = true;
+  let normalSuspended = false;
   const options = new URLSearchParams(location.search);
   const port = Number(options.get('port') || (location.protocol === 'http:' && ['127.0.0.1','localhost'].includes(location.hostname) ? location.port : 8766));
   if (!Number.isInteger(port) || port < 1024 || port > 65535) return;
@@ -227,6 +229,20 @@
     // Native bitmap decoding cannot be aborted. Its owner stays alive only
     // until that ONE decode returns, then closes it even after hide/unload.
   }
+  function paintBitmap(canvas, bitmap, width, height = width, contain = false) {
+    const context = canvas.getContext('2d',{willReadFrequently:true});
+    if (!context) throw new Error('Artwork canvas unavailable');
+    canvas.width = width; canvas.height = height;
+    context.imageSmoothingEnabled = true; context.imageSmoothingQuality = 'high';
+    if (contain) {
+      const scale = Math.min(width/bitmap.width,height/bitmap.height);
+      context.drawImage(bitmap,(width-bitmap.width*scale)/2,(height-bitmap.height*scale)/2,bitmap.width*scale,bitmap.height*scale);
+    } else {
+      const side = Math.min(bitmap.width,bitmap.height);
+      context.drawImage(bitmap,(bitmap.width-side)/2,(bitmap.height-side)/2,side,side,0,0,width,height);
+    }
+    context.getImageData(0,0,1,1);
+  }
   function coverSurface(bitmap) {
     let canvas = coverSurfaces.find(node => !node.isConnected);
     if (!canvas) {
@@ -237,17 +253,11 @@
     }
     const unit = Math.min(innerWidth*.017,innerHeight*.03022226);
     const pixels = Math.min(1024,Math.max(64,Math.ceil((parseFloat(bar.style.getPropertyValue('--obs-cover-size')) || unit*6.7)*(window.devicePixelRatio || 1)*1.1)));
-    const context = canvas.getContext('2d',{willReadFrequently:true});
-    if (!context) throw new Error('Artwork canvas unavailable');
     // Draw once per cover into a display-sized backing store, with no frame
     // queue and no full-size HTML image retained for the current song.
-    canvas.width = canvas.height = pixels;
-    context.imageSmoothingEnabled = true; context.imageSmoothingQuality = 'high';
-    const side = Math.min(bitmap.width,bitmap.height);
-    context.drawImage(bitmap,(bitmap.width-side)/2,(bitmap.height-side)/2,side,side,0,0,pixels,pixels);
     // Flush the draw before close(), rather than leaving source-image work
     // deferred. The small reusable canvas owns the displayed pixels.
-    context.getImageData(0,0,1,1);
+    paintBitmap(canvas,bitmap,pixels);
     canvas.style.opacity = '1'; canvas.style.transform = canvas.style.filter = 'none';
     canvas.classList.remove('is-outgoing');
     return canvas;
@@ -327,7 +337,7 @@
   }
   const stamp = value => { const seconds = Math.max(0,Math.floor(Number(value)||0)); return String(Math.floor(seconds/60)).padStart(2,'0')+':'+String(seconds%60).padStart(2,'0'); };
   function tick() {
-    if (!visible() || !snapshot) return;
+    if (!visible() || !snapshot || normalSuspended || window.FuraticOBSPresentation?.active) return;
     const song = snapshot.song;
     const position = song ? Math.min(song.duration, song.position + (song.paused ? 0 : Math.max(0, performance.now()-received)/1000)) : 0;
     typeText(fields.elapsed, stamp(position), true);
@@ -338,6 +348,7 @@
     if (!value || value.version !== 1 || !Number.isFinite(value.updatedAt) || !value.updatedAt) return;
     bar.dataset.mode = value.mode;
     snapshot = value; received = performance.now() - Math.max(0,Date.now()/1000-value.updatedAt)*1000;
+    if (window.FuraticOBSPresentation?.receive(value) || normalSuspended) return;
     const song = value.song, id = song?.id || (value.queueEmpty ? 'empty' : 'preparing');
     songRoot.dataset.state = song ? 'playing' : value.queueEmpty ? 'empty' : 'preparing';
     typeText(fields.title, song?.title || (value.queueEmpty ? 'Queue empty' : 'Getting your music ready…'));
@@ -433,6 +444,31 @@
     clock = setInterval(tick,100); poll();
   }
   const sourceVisibility = event => { if (typeof event.detail?.visible === 'boolean') obsVisible = event.detail.visible; visibility(); };
+  function releaseText(element) {
+    clearTimeout(layouts.get(element)); layouts.delete(element);
+    disposeAnimation(marquees.get(element)?.animation); marquees.delete(element);
+    for (const content of textSlots.get(element) || []) removeNode(content);
+    textSlots.delete(element); texts.delete(element); resize.unobserve?.(element);
+  }
+  window.FuraticOBSUI = {
+    text(element,value,digits=false) { resize.observe(element); typeText(element,value,digits); },
+    animate, paint:paintBitmap, remove:removeNode, release:releaseText,
+    get snapshot() { return snapshot; },
+    suspend() {
+      normalSuspended = true; bar.hidden = true; cancelCoverLoad();
+      bar.style.transform = bar.style.filter = 'none'; bar.style.opacity = '1';
+      mascot?.removeAttribute('src');
+      for (const element of [...Object.values(fields),...Object.values(noticeFields)]) releaseText(element);
+      for (const canvas of coverSurfaces) removeNode(canvas);
+      coverSurfaces.length = 0; coverId = songId = notificationId = '';
+    },
+    resume() {
+      normalSuspended = false;
+      for (const element of [...Object.values(fields),...Object.values(noticeFields)]) resize.observe(element);
+      if (mascot && mascotSource) mascot.setAttribute('src',mascotSource);
+      bar.hidden = false; if (snapshot && !stopped) receive(snapshot);
+    },
+  };
   window.addEventListener('obsSourceVisibleChanged', sourceVisibility);
   document.addEventListener('visibilitychange', visibility);
   window.addEventListener('pagehide', () => {
@@ -447,6 +483,8 @@
     coverSurfaces.length = 0; textSlots.clear();
     if (mascot) removeNode(mascot);
     effects.clear(); marquees.clear(); texts.clear(); snapshot = null;
+    delete window.FuraticOBSUI;
   });
+  window.FuraticOBSStartPresentation?.();
   visibility();
 })();

@@ -100,6 +100,54 @@ canvas{display:block;width:100%;height:100%}
 .vote-notice-ordinal{font:400 23px "Cracker Winter",sans-serif}.vote-notice-place{font:400 8px "Cracker Winter",sans-serif}
 
 #obs-topbar[data-mode="afterhours"] #vote-notice{visibility:hidden}
+
+/* OBS-only finale. All artwork/text nodes are bounded and released on exit. */
+#obs-topbar[hidden]{display:none}
+.obs-showcase-root{--p:min(1vw,1.777778vh);position:fixed;inset:0;z-index:4;display:flex;align-items:center;justify-content:center;pointer-events:none;color:#f5f7fc;font:400 calc(var(--p)*2)/1.2 "Cracker Winter",sans-serif;font-synthesis:none;-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility}
+.obs-showcase-root *{font-family:"Cracker Winter",sans-serif;font-weight:400;font-synthesis:none}
+.obs-showcase-glass{position:absolute;width:calc(var(--p)*78);max-width:1500px;padding:calc(var(--p)*2.3);border:1px solid #ffffff42;border-radius:calc(var(--p)*1.5);background:linear-gradient(125deg,rgba(12,19,31,.40),rgba(12,19,31,.26));backdrop-filter:blur(9px) saturate(115%);-webkit-backdrop-filter:blur(9px) saturate(115%);box-shadow:0 24px 80px #05102030;overflow:hidden}
+.obs-thanks{text-align:center;width:calc(var(--p)*72);padding:calc(var(--p)*1.6) calc(var(--p)*3) calc(var(--p)*2.4)}
+.obs-thanks-brand{width:calc(var(--p)*33);height:calc(var(--p)*20.3);margin:0 auto calc(var(--p)*.1)}
+.obs-thanks-heading{color:#008ef8;font-size:calc(var(--p)*3.7);line-height:1.2}
+.obs-thanks-copy{font-size:calc(var(--p)*1.35);color:#e6edf7;margin-top:calc(var(--p)*.8)}
+.obs-thanks-schedule{font-size:calc(var(--p)*1.7);margin-top:calc(var(--p)*.2)}
+.obs-thanks-url{color:#d56b0c;font-size:calc(var(--p)*2.8);margin-top:calc(var(--p)*1)}
+.obs-winner{--award:#f4cc74;--award-light:#fff4cb;--award-dark:#a9792d;min-height:calc(var(--p)*31);padding:calc(var(--p)*2) calc(var(--p)*3)}
+.obs-winner[data-rank="2"]{--award:#c5dbf4;--award-light:#edf7ff;--award-dark:#687e99}
+.obs-winner[data-rank="3"]{--award:#dda780;--award-light:#f4d6c1;--award-dark:#946344}
+.obs-winner:before{content:"";position:absolute;inset:0;background:radial-gradient(ellipse at 12% 25%,color-mix(in srgb,var(--award) 16%,transparent),transparent 64%);pointer-events:none}
+.obs-winner-heading{position:relative;padding:calc(var(--p)*.4) 0 calc(var(--p)*1.6) calc(var(--p)*8.5);min-height:calc(var(--p)*8)}
+.obs-winner-kicker{font-size:calc(var(--p)*1.1);letter-spacing:.1em;color:#d5e2f0}
+.obs-winner-place{font-size:calc(var(--p)*3.6);color:var(--award);line-height:1.2}
+.obs-showcase-trophy{--metal:var(--award);--metal-light:var(--award-light);--metal-dark:var(--award-dark);--medal-ink:#292a35;position:absolute;left:0;top:calc(var(--p)*-.5);width:calc(var(--p)*6.4);height:calc(var(--p)*7.3);filter:drop-shadow(0 5px 16px #0003)}
+.obs-showcase-trophy svg{display:block;width:100%;height:100%;overflow:visible}
+.obs-showcase-trophy[data-rank="1"] .vote-notice-crown{display:block}
+.obs-winner-body{position:relative;display:flex;align-items:center;gap:calc(var(--p)*2.5)}
+.obs-winner-art{width:calc(var(--p)*18);height:calc(var(--p)*18);flex:none;border-radius:calc(var(--p)*1.2);overflow:hidden;background:linear-gradient(130deg,#3a76a057,#8765aa57);border:1px solid #ffffff35;box-shadow:0 12px 36px #0003}
+.obs-winner-art canvas{width:100%;height:100%}
+.obs-winner-copy{flex:1;min-width:0}
+.obs-winner-title{font-size:calc(var(--p)*3.1);line-height:1.2}
+.obs-winner-artist{font-size:calc(var(--p)*1.9);color:#d8e2ef;margin-top:calc(var(--p)*.55)}
+.obs-winner-meta{display:flex;align-items:center;gap:calc(var(--p)*1.3);margin-top:calc(var(--p)*1.8);color:var(--award)}
+.obs-winner-votes{font-size:calc(var(--p)*2.05)}
+.obs-winner-duration{font-size:calc(var(--p)*1.5);color:#d8e2ef}
+.obs-winner-footer{margin-top:calc(var(--p)*1.7);padding-top:calc(var(--p)*.6);border-top:1px solid #ffffff26;font-size:calc(var(--p)*1);letter-spacing:.12em;color:#d1ddec;text-align:center}
+.obs-chart{height:calc(var(--p)*47);display:flex;flex-direction:column;padding:calc(var(--p)*2) calc(var(--p)*2.8)}
+.obs-chart header{flex:none;text-align:center;padding-bottom:calc(var(--p)*1.1);border-bottom:1px solid #ffffff25}
+.obs-chart-heading{font-size:calc(var(--p)*2.65);color:#a9dff1}
+.obs-chart-subtitle{font-size:calc(var(--p)*1.2);color:#d5dfed;margin-top:calc(var(--p)*.15)}
+.obs-chart-window{--row-height:calc(var(--p)*5.4);position:relative;flex:1;min-height:0;overflow:hidden;margin-top:calc(var(--p)*.6);mask-image:linear-gradient(transparent,#000 3%,#000 97%,transparent)}
+.obs-chart-track{position:relative;height:100%}
+.obs-chart-row{position:absolute;left:0;right:0;top:0;height:var(--row-height);display:flex;align-items:center;gap:calc(var(--p)*1);padding:calc(var(--p)*.45) calc(var(--p)*.3);border-bottom:1px solid #ffffff16}
+.obs-chart-row[hidden]{display:none}
+.obs-chart-rank{flex:none;width:calc(var(--p)*3);font-size:calc(var(--p)*1.8);color:#a9dff1;text-align:center}
+.obs-chart-art{flex:none;width:calc(var(--p)*4.4);height:calc(var(--p)*4.4);border-radius:calc(var(--p)*.6);overflow:hidden;background:#ffffff12}
+.obs-chart-art canvas{width:100%;height:100%}
+.obs-chart-copy{flex:1;min-width:0}
+.obs-chart-title{font-size:calc(var(--p)*1.55)}
+.obs-chart-artist{font-size:calc(var(--p)*1.05);color:#cbd9e9}
+.obs-chart-votes{flex:none;max-width:22%;font-size:calc(var(--p)*1.45);color:#c8e8f0}
+.obs-chart-footer{flex:none;text-align:center;font-size:calc(var(--p)*1);letter-spacing:.1em;color:#ccd8e7;padding-top:calc(var(--p)*.7)}
 </style>
 </head>
 <body>
@@ -154,6 +202,7 @@ canvas{display:block;width:100%;height:100%}
   <div class="vote-notice-footer"><span id="vote-notice-footer" class="obs-text-viewport"></span><strong class="vote-notice-url">furatic.xyz</strong></div>
 </div></aside>
 </div>
+<script src="obs-foreground.js?v=1"></script>
 <script>
 (() => {
   'use strict';
@@ -327,6 +376,7 @@ canvas{display:block;width:100%;height:100%}
   // One program, one immutable geometry buffer, zero offscreen textures/FBOs.
   // At most one submitted GPU frame: a slow GPU cannot build a command backlog.
   let programs=[],buffer=null,loc={},w=0,h=0,lost=false,stopped=false,raf=0;
+  let foreground=null;
   let gpuFence=null,resizePending=true,nextRender=0,rendered=0,gpuSkipped=0;
   let obsVisible=true,visible=!document.hidden;
   let socket=null,reconnectTimer=0,retry=500,lastReceived=-Infinity,lastIds=null,connectionOpened=0;
@@ -439,7 +489,7 @@ canvas{display:block;width:100%;height:100%}
     finally{if(vertex)gl.deleteShader(vertex);if(pixel)gl.deleteShader(pixel);}
   }
   function freeFence(){if(gpuFence){gl.deleteSync(gpuFence);gpuFence=null;}}
-  function freeGPU(){freeFence();for(const p of programs)gl.deleteProgram(p);programs=[];if(buffer)gl.deleteBuffer(buffer);buffer=null;}
+  function freeGPU(){foreground?.dispose();foreground=null;freeFence();for(const p of programs)gl.deleteProgram(p);programs=[];if(buffer)gl.deleteBuffer(buffer);buffer=null;}
   function gpuReady(){
     if(!gpuFence)return true;
     // Timeout zero: test completion without blocking JavaScript or OBS.
@@ -460,6 +510,7 @@ canvas{display:block;width:100%;height:100%}
   }
   function initialize(){
     // Context loss invalidates the previous native objects; never retain them.
+    foreground?.dispose(false);foreground=null;
     programs=[];buffer=null;gpuFence=null;
     programs.push(program(fs));
     buffer=gl.createBuffer();if(!buffer)throw new Error('Geometry allocation failed');
@@ -467,6 +518,7 @@ canvas{display:block;width:100%;height:100%}
     gl.useProgram(programs[0]);const a=gl.getAttribLocation(programs[0],'a_position');gl.enableVertexAttribArray(a);gl.vertexAttribPointer(a,2,gl.FLOAT,false,0,0);
     const at=n=>gl.getUniformLocation(programs[0],n);
     loc={res:at('u_resolution'),motion:at('u_motion'),clouds:at('u_clouds[0]'),material:at('u_material[0]'),dance:at('u_dance'),thumps:at('u_thumps'),bass:at('u_bass'),music:at('u_music'),energy:at('u_energy'),sizes:at('u_sizes'),bands:at('u_bands[0]'),lights:at('u_lights'),edgeEnergy:at('u_edgeEnergy'),edgeLights:at('u_edgeLights'),edgeMusic:at('u_edgeMusic'),edgeBands:at('u_edgeBands[0]')};
+    try{foreground=window.FuraticOBSCreateForeground?.(gl,visible)||null;}catch(_error){foreground=null;}
     resizePending=true;if(visible)resize();
   }
   function birth(cloud,strength,born){
@@ -691,6 +743,7 @@ canvas{display:block;width:100%;height:100%}
     if(data.version!==1||!Array.isArray(data.bands)||data.bands.length!==48||!data.bands.every(Number.isFinite))return;
     const values=[data.level,data.bass,data.mid,data.treble,data.activity,data.serverTime,data.kickAt,data.accentAt,data.kickId,data.accentId,data.kick,data.accent];
     if(!values.every(Number.isFinite))return;
+    foreground?.receive(data.foreground);
     const now=performance.now()/1000,capturing=data.status==='capturing';lastReceived=now;retry=500;
     desiredMusic.set([clamp(data.level),clamp(data.bass),clamp(data.mid),clamp(data.treble)]);
     desiredBands.set(data.bands.map(clamp));activity=clamp(data.activity);
@@ -1273,6 +1326,7 @@ canvas{display:block;width:100%;height:100%}
     gl.uniform2f(loc.res,w,h);gl.uniform4fv(loc.motion,motion);gl.uniform4fv(loc.clouds,clouds);gl.uniform4fv(loc.material,material);gl.uniform4fv(loc.dance,dance);gl.uniform4fv(loc.thumps,thumps);gl.uniform2f(loc.bass,clamp(bassVisual[0]),clamp(bassVisual[1]));gl.uniform4fv(loc.music,renderMusic);gl.uniform4fv(loc.energy,renderEnergy);gl.uniform4fv(loc.sizes,renderSizes);gl.uniform1fv(loc.bands,renderBands);gl.uniform4fv(loc.lights,lightEnergy);
     gl.uniform4fv(loc.edgeEnergy,edgeEnergy);gl.uniform4fv(loc.edgeLights,edgeLights);gl.uniform4fv(loc.edgeMusic,edgeMusic);gl.uniform1fv(loc.edgeBands,edgeBands);
     gl.drawArrays(gl.TRIANGLES,0,3);
+    try{foreground?.draw(w,h);}catch(_error){foreground?.dispose();foreground=null;gl.disable(gl.BLEND);gl.bindVertexArray(null);}
     gpuFence=gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE,0);
     if(!gpuFence)throw new Error('GPU fence allocation failed');
     gl.flush();rendered++;
@@ -1281,7 +1335,7 @@ canvas{display:block;width:100%;height:100%}
     raf=0;if(lost||stopped||!visible)return;
     const now=timestamp/1000,dt=lastFrame?Math.min(.05,Math.max(0,(timestamp-lastFrame)/1000)):1/60;lastFrame=timestamp;
     try{
-      update(dt,now);
+      update(dt,now);foreground?.update(dt,now);
       if(timestamp+.1>=nextRender){
         if(gpuReady()){
           if(resizePending)resize();render();publishScene(timestamp);
@@ -1295,7 +1349,7 @@ canvas{display:block;width:100%;height:100%}
   function setVisibility(){
     const showing=obsVisible&&!document.hidden;
     if(showing===visible||stopped)return;visible=showing;
-    cancelAnimationFrame(raf);raf=0;lastFrame=0;nextRender=0;
+    cancelAnimationFrame(raf);raf=0;lastFrame=0;nextRender=0;foreground?.visibility(visible);
     if(!visible){
       stopScene();
       clearTimeout(reconnectTimer);reconnectTimer=0;
@@ -1316,7 +1370,7 @@ canvas{display:block;width:100%;height:100%}
   let observer;
   try{initialize();observer=new ResizeObserver(()=>{resizePending=true;});observer.observe(canvas);}
   catch(error){freeGPU();report('Graphics initialization failed: '+error.message,true);return;}
-  canvas.addEventListener('webglcontextlost',event=>{if(stopped)return;event.preventDefault();lost=true;gpuFence=null;cancelAnimationFrame(raf);raf=0;report('Graphics context recovering',true);});
+  canvas.addEventListener('webglcontextlost',event=>{if(stopped)return;event.preventDefault();lost=true;foreground?.dispose(false);foreground=null;gpuFence=null;cancelAnimationFrame(raf);raf=0;report('Graphics context recovering',true);});
   canvas.addEventListener('webglcontextrestored',()=>{if(stopped||!lost)return;try{initialize();lost=false;lastFrame=0;nextRender=0;report('Graphics recovered');if(visible)raf=requestAnimationFrame(frame);}catch(error){freeGPU();lost=false;report('Graphics recovery failed',true);cleanup();}});
   window.addEventListener('pagehide',cleanup,{once:true});
   window.addEventListener('obsSourceVisibleChanged',obsVisibility);document.addEventListener('visibilitychange',setVisibility);

@@ -26,6 +26,7 @@ from .capture import Capture
 MAX_CLIENTS = 4
 PAGE = Path(__file__).with_name("obs-background.html")
 NOTIFICATION_SCRIPT = Path(__file__).with_name("obs-topbar.js")
+ASSETS = Path(__file__).with_name('assets')
 
 LOG = logging.getLogger("furatic.visualizer")
 
@@ -72,6 +73,12 @@ def create_app(capture, port):
     clients = set()
     overlay = {"version": 1, "updatedAt": 0, "mode": "event", "song": None, "queueEmpty": False, "message": None}
     cover_id, cover_bytes, cover_type = '', b'', 'image/jpeg'
+    results = {'version': 1, 'eventId': '', 'endedAt': 0, 'songs': []}
+    try:
+        configured_cache = (PAGE.parent.parent/'config/cache_dir').read_text(encoding='utf-8').strip()
+        cache_dir = Path(configured_cache).expanduser() if configured_cache else Path.home()/'Music/raveberry'
+    except OSError:
+        cache_dir = Path.home()/'Music/raveberry'
     publish_token = os.environ.get('FURATIC_OBS_PUBLISH_TOKEN', '')
     publishers = set()
     scene = None
@@ -81,6 +88,14 @@ def create_app(capture, port):
                      "thumps": 4, "bass": 2, "music": 4, "energy": 4, "sizes": 4,
                      "bands": 48, "lights": 4, "edgeEnergy": 4, "edgeLights": 4,
                      "edgeMusic": 4, "edgeBands": 48}
+
+    def foreground_capture():
+        event = overlay.get('event')
+        finale = overlay['mode'] == 'afterhours' and event and time.time() < event['endedAt']+600
+        if hasattr(capture, 'set_foreground_active'):
+            capture.set_foreground_active(bool(clients) and not finale)
+
+    foreground_capture()
 
     def snapshot():
         frame = capture.snapshot()
@@ -103,6 +118,15 @@ def create_app(capture, port):
     async def notification_script(request):
         return web.Response(body=NOTIFICATION_SCRIPT.read_bytes(), content_type="application/javascript")
 
+    async def foreground_script(request):
+        return web.Response(body=PAGE.with_name('obs-foreground.js').read_bytes(), content_type='application/javascript')
+
+    async def asset(request):
+        name = request.match_info['name']
+        if name not in ('FuraticLogo.png', 'FuraticLogoWide.png'):
+            raise web.HTTPNotFound()
+        return web.FileResponse(ASSETS/name, headers={'Content-Type': 'image/png'})
+
     def authorize(request):
         if not publish_token or not hmac.compare_digest(request.headers.get('Authorization', ''), 'Bearer ' + publish_token):
             raise web.HTTPForbidden(text='Private publisher only')
@@ -111,7 +135,7 @@ def create_app(capture, port):
         return web.json_response(overlay)
 
     async def publish_overlay(request):
-        nonlocal overlay
+        nonlocal overlay, results, cover_id, cover_bytes
         authorize(request)
         if request.content_length is None or request.content_length > 32768:
             raise web.HTTPRequestEntityTooLarge(max_size=32768, actual_size=request.content_length or 0)
@@ -152,12 +176,88 @@ def create_app(capture, port):
                         raise ValueError()
                 if message.get('kind') == 'rank' and message.get('rank') not in (1, 2, 3):
                     raise ValueError()
+            event = value.get('event')
+            if event is not None:
+                if (not isinstance(event, dict) or not isinstance(event.get('eventId'), str)
+                        or not re.fullmatch(r'[A-Za-z0-9_-]{1,64}', event['eventId'])
+                        or type(event.get('endedAt')) not in (int, float)
+                        or not math.isfinite(event['endedAt']) or not 0 < event['endedAt'] <= time.time()+30):
+                    raise ValueError()
+                event = {key: event[key] for key in ('eventId', 'endedAt')}
             if value['updatedAt'] >= overlay['updatedAt']:
                 overlay = {'version': 1, 'updatedAt': at, 'mode': value['mode'], 'song': song,
-                           'queueEmpty': value['queueEmpty'], 'message': message}
+                           'queueEmpty': value['queueEmpty'], 'message': message, 'event': event}
+                if (value['mode'] != 'afterhours' or not event or event['eventId'] != results['eventId']
+                        or event['endedAt'] != results['endedAt']):
+                    results = {'version': 1, 'eventId': '', 'endedAt': 0, 'songs': []}
+                if value['mode'] == 'afterhours' and song is None:
+                    cover_id, cover_bytes = '', b''
+                foreground_capture()
         except (ValueError, TypeError, KeyError):
             raise web.HTTPBadRequest(text='Invalid overlay snapshot') from None
-        return web.json_response({'ok': True, 'artworkId': cover_id})
+        return web.json_response({'ok': True, 'artworkId': cover_id, 'resultsId': results['eventId']})
+
+    async def overlay_results(request):
+        return web.json_response(results)
+
+    async def publish_results(request):
+        nonlocal results
+        authorize(request)
+        if request.content_length is None or request.content_length > 1024*1024:
+            raise web.HTTPRequestEntityTooLarge(max_size=1024*1024, actual_size=request.content_length or 0)
+        try:
+            value = await request.json()
+            event = overlay.get('event')
+            if (not isinstance(value, dict) or value.get('version') != 1 or not event
+                    or overlay['mode'] != 'afterhours' or value.get('eventId') != event['eventId']
+                    or value.get('endedAt') != event['endedAt'] or not isinstance(value.get('songs'), list)
+                    or len(value['songs']) > 50):
+                raise ValueError()
+            songs = []
+            for row in value['songs']:
+                if not isinstance(row, dict):
+                    raise ValueError()
+                for key in ('title', 'artist'):
+                    if not isinstance(row.get(key), str) or len(row[key]) > 1000:
+                        raise ValueError()
+                if not isinstance(row.get('videoId'), str) or row['videoId'] and not re.fullmatch(r'[A-Za-z0-9_-]{11}', row['videoId']):
+                    raise ValueError()
+                if (type(row.get('votes')) is not int or abs(row['votes']) > 10000000
+                        or type(row.get('duration')) not in (int, float)
+                        or not math.isfinite(row['duration']) or not 0 <= row['duration'] <= 10000000):
+                    raise ValueError()
+                songs.append({key: row[key] for key in ('title', 'artist', 'votes', 'duration', 'videoId')})
+            if any(songs[i]['votes'] < songs[i+1]['votes'] for i in range(len(songs)-1)):
+                raise ValueError()
+            results = {'version': 1, 'eventId': event['eventId'], 'endedAt': event['endedAt'], 'songs': songs}
+        except (ValueError, TypeError, KeyError):
+            raise web.HTTPBadRequest(text='Invalid event results') from None
+        return web.json_response({'ok': True})
+
+    async def results_artwork(request):
+        video = request.match_info['video']
+        if (time.time() > results['endedAt']+600 or not re.fullmatch(r'[A-Za-z0-9_-]{11}', video)
+                or video not in {row['videoId'] for row in results['songs']}):
+            raise web.HTTPNotFound()
+        path = cache_dir/'artwork'/(video+'.img')
+        try:
+            if 0 < path.stat().st_size <= 2*1024*1024:
+                with path.open('rb') as stream:
+                    prefix = stream.read(12)
+                mime = 'image/png' if prefix.startswith(b'\x89PNG') else 'image/webp' if prefix.startswith(b'RIFF') else 'image/jpeg'
+                return web.FileResponse(path, headers={'Content-Type': mime})
+        except OSError:
+            pass
+        # Older caches may have the existing cover embedded only in their M4A.
+        # Read it locally; this route never performs a provider/network lookup.
+        try:
+            from mutagen.mp4 import MP4
+            data = bytes((MP4(cache_dir/(video+'.m4a')).tags or {}).get('covr', [b''])[0])
+            if data and len(data) <= 2*1024*1024:
+                return web.Response(body=data, content_type='image/png' if data.startswith(b'\x89PNG') else 'image/jpeg')
+        except Exception:  # Optional embedded-artwork recovery must fail gracefully.
+            pass
+        raise web.HTTPNotFound()
 
     async def publish_artwork(request):
         nonlocal cover_id, cover_bytes, cover_type
@@ -233,6 +333,7 @@ def create_app(capture, port):
         ws = web.WebSocketResponse(heartbeat=20, max_msg_size=1024, compress=False)
         # Reserve before the handshake's first await to enforce the client cap.
         clients.add(ws)
+        foreground_capture()
         sender = None
         try:
             await ws.prepare(request)
@@ -257,6 +358,7 @@ def create_app(capture, port):
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await sender
             clients.discard(ws)
+            foreground_capture()
             if not ws.closed:
                 await ws.close()
         return ws
@@ -270,8 +372,13 @@ def create_app(capture, port):
     app.router.add_get("/", page)
     app.router.add_get("/obs-background.html", page)
     app.router.add_get("/obs-topbar.js", notification_script)
+    app.router.add_get('/obs-foreground.js', foreground_script)
+    app.router.add_get('/assets/{name}', asset)
     app.router.add_get("/overlay-state", overlay_state)
     app.router.add_post("/overlay-state", publish_overlay)
+    app.router.add_get('/overlay-results', overlay_results)
+    app.router.add_post('/overlay-results', publish_results)
+    app.router.add_get('/results-artwork/{video}', results_artwork)
     app.router.add_get("/overlay-artwork/{video}", artwork)
     app.router.add_post("/overlay-artwork/{video}", publish_artwork)
     app.router.add_get("/_healthz/", health)

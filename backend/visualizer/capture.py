@@ -11,6 +11,7 @@ import threading
 import time
 
 from .dsp import Analyzer, empty_frame
+from .foreground import ForegroundAnalyzer
 
 LOG = logging.getLogger(__name__)
 
@@ -26,6 +27,7 @@ class Capture:
         self.kick_offset = self.accent_offset = 0
         self.cloud_offsets = [0] * 4
         self.heartbeat = time.monotonic()
+        self.foreground_enabled = True
         self.thread = threading.Thread(target=self._run, name="obs-audio-analysis", daemon=True)
 
     def start(self):
@@ -42,6 +44,8 @@ class Capture:
         now = time.monotonic()
         stale = now - frame["capturedAt"] > .30
         if stale:
+            if 'foreground' in frame:
+                frame['foreground'] = ForegroundAnalyzer.empty()
             for name in ["level", "bass", "mid", "treble", "activity", "kick", "accent",
                          "rhythmConfidence", "rhythmTempo", "rhythmDrive"]:
                 frame[name] = 0.0
@@ -57,8 +61,27 @@ class Capture:
     def healthy(self):
         return self.thread.is_alive() and time.monotonic() - self.heartbeat < 20
 
+    def set_foreground_active(self, enabled):
+        self.foreground_enabled = bool(enabled)
+
     def _touch(self):
         self.heartbeat = time.monotonic()
+
+    def _foreground_feed(self, state, rate, channels, data, timestamp=None):
+        if not self.foreground_enabled:
+            state.update(analyzer=None, failed=False)
+            return ForegroundAnalyzer.empty()
+        if state['failed']:
+            return ForegroundAnalyzer.empty()
+        try:
+            state['analyzer'] = state['analyzer'] or ForegroundAnalyzer(rate, channels)
+            return state['analyzer'].feed(data, timestamp)
+        except Exception:
+            # Optional foreground work must never reopen capture or disturb the
+            # already-working background analyzer. Retry after a mode/device reset.
+            state.update(analyzer=None, failed=True)
+            LOG.warning('Foreground analysis unavailable; background capture continues')
+            return ForegroundAnalyzer.empty()
 
     def _publish(self, frame):
         if frame is not None:
@@ -127,6 +150,7 @@ class Capture:
             channels = min(8, max(1, int(device["maxInputChannels"])))
             rate = int(device["defaultSampleRate"])
             analyzer = Analyzer(rate, channels)
+            foreground = {'analyzer': None, 'failed': False}
             with manager.open(format=audio.paFloat32, channels=channels, rate=rate,
                               input=True, output=False, input_device_index=device["index"],
                               frames_per_buffer=512, stream_callback=callback) as stream:
@@ -137,7 +161,10 @@ class Capture:
                     self._touch()
                     try:
                         data, timestamp = packets.get(timeout=.10)
-                        self._publish(analyzer.feed(data, timestamp))
+                        features = self._foreground_feed(foreground, rate, channels, data, timestamp)
+                        frame = analyzer.feed(data, timestamp)
+                        if frame is not None:
+                            self._publish({**frame, 'foreground': features})
                     except queue.Empty:
                         # Idle loopback is healthy. Reopen only an inactive stream.
                         if not stream.is_active():
@@ -149,6 +176,7 @@ class Capture:
             raise RuntimeError("Linux audio analysis needs parec (pulseaudio-utils) and an output monitor")
         device = os.environ.get("FURATIC_VISUALIZER_DEVICE", "@DEFAULT_MONITOR@")
         analyzer = Analyzer(48000, 2)
+        foreground = {'analyzer': None, 'failed': False}
         process = subprocess.Popen(
             [executable, "--raw", "--format=float32le", "--rate=48000", "--channels=2",
              "--latency-msec=20", "--process-time-msec=10", "--device=" + device],
@@ -167,7 +195,11 @@ class Capture:
                         raise RuntimeError("PulseAudio monitor stream stopped")
                     pending += data
                     complete = len(pending) // 8 * 8
-                    self._publish(analyzer.feed(pending[:complete]))
+                    data = pending[:complete]
+                    features = self._foreground_feed(foreground, 48000, 2, data)
+                    frame = analyzer.feed(data)
+                    if frame is not None:
+                        self._publish({**frame, 'foreground': features})
                     pending = pending[complete:]
                 elif process.poll() is not None:
                     raise RuntimeError("PulseAudio monitor process exited")
