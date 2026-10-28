@@ -23,8 +23,9 @@ from aiohttp import web, WSMsgType
 from .srt_runtime import SRTRuntime, RuntimeSetupError, owns_udp_port
 
 HERE = Path(__file__).parent
-MAX_QUEUE = 32  # 32 x 64 KiB, shared immutable bytes, per media client.
-MAX_AGE = 2.0
+MAX_QUEUE = 8  # At most 512 KiB of encoded data; never decoded video frames.
+MAX_AGE = 1.0
+TRANSPORT_BATCH_SECONDS = .020  # Coalesce TS writes for at most 20 ms; keep every frame.
 
 
 def settings_path():
@@ -324,13 +325,22 @@ class VideoReceiver:
                             await asyncio.sleep(.05)
                         self.status_to('error', f"Could not open UDP {self.profile()['port']}. Release the old OBS SRT Media Source and retry.")
                     async def output():
+                        loop = asyncio.get_running_loop()
                         while True:
                             try: data = await asyncio.wait_for(self.process.stdout.read(65536), 8)
                             except asyncio.TimeoutError:
                                 if not self.last_packet: continue  # A listener may wait all night for its first sender.
                                 raise
                             if not data: return
-                            self.publish(data)
+                            chunks = [data]; length = len(data); deadline = loop.time()+TRANSPORT_BATCH_SECONDS
+                            while length < 65536:
+                                remaining = deadline-loop.time()
+                                if remaining <= 0: break
+                                try: part = await asyncio.wait_for(self.process.stdout.read(65536-length), remaining)
+                                except asyncio.TimeoutError: break
+                                if not part: break
+                                chunks.append(part); length += len(part)
+                            self.publish(b''.join(chunks))
                     async def errors():
                         while True:
                             line = await self.process.stderr.readline()
@@ -455,7 +465,7 @@ def install_routes(app, receiver, port):
 
     async def media(request):
         if not receiver.active: raise web.HTTPConflict(text='Select Video layout and enable the receiver')
-        if len(receiver.media) >= 2: raise web.HTTPServiceUnavailable(text='Video client limit reached')
+        if receiver.media: raise web.HTTPServiceUnavailable(text='The live video is already playing in another display')
         ws = web.WebSocketResponse(heartbeat=15, max_msg_size=1024, compress=False)
         queue = asyncio.Queue(maxsize=MAX_QUEUE); receiver.media.add(queue); sockets.add(ws)
         sender = None

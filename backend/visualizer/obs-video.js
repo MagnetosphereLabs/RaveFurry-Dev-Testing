@@ -10,6 +10,8 @@
   let generation=0,inputGeneration=-1,retry=0,reconnect=0,watch=0,retire=0,moveFrame=0;
   let effects=new Set(),drag=null,geometry=null,ratio=16/9,lastTime=0,lastProgress=0;
   let clientRetry=0,playerRetire=0,failures=0,loadTicket=0,blockedGeneration=-1;
+  let leaseAbort=null,leaseRelease=null,leaseSupported=Boolean(navigator.locks?.request),leaseOwned=!leaseSupported,excessBuffer=0;
+  let opaqueRect=null,pictureVisible=false;
   const visible=()=>obsVisible&&!document.hidden;
   const active=()=>!stopped&&visible()&&state?.layout==='video'&&state.enabled&&!state.suspended&&!window.FuraticOBSPresentation?.active;
   function animate(node,frames,duration=550){
@@ -27,17 +29,36 @@
   }
   function teardownPlayer(clearRetry=true){
     ++generation;if(clearRetry){clearTimeout(clientRetry);clientRetry=0;}clearTimeout(playerRetire);playerRetire=0;clearInterval(watch);watch=0;
-    const old=player;player=null;
+    const old=player,element=video;player=video=null;excessBuffer=0;pictureVisible=false;
+    if(element){element.onplaying=element.onloadedmetadata=element.onerror=null;try{element.pause();}catch(_){}}
     if(old){
       // Pinned mpegts.js 1.8.2 normally waits for a worker acknowledgment.
       // Capture ownership before unload clears it; teardown must finish even
       // when that worker is delayed. The vendored patch retains its handler.
-      const owner=old._player_engine?._transmuxer||old._player_engine,worker=owner?._worker;
-      try{old.pause();old.unload();old.detachMediaElement();old.destroy();}catch(_){try{old.destroy();}catch(_){}}
-      finally{if(worker){try{if(owner._furaticWorkerHandler)worker.removeEventListener('message',owner._furaticWorkerHandler);worker.terminate();if(worker.objectURL)URL.revokeObjectURL(worker.objectURL);}catch(_){}owner._worker=null;owner._furaticWorkerHandler=null;}}
+      const engine=old._player_engine,owner=engine?._transmuxer||engine,worker=owner?._worker,mse=engine?._mse_controller;
+      // Each release is independent: one driver/MSE exception must not skip
+      // detaching the decoder, destroying its worker or revoking media URLs.
+      for(const method of ['pause','unload','detachMediaElement','destroy'])try{old[method]?.();}catch(_){}
+      if(mse){try{mse.shutdown?.();}catch(_){}try{mse.revokeObjectURL?.();}catch(_){}}
+      if(worker){try{if(owner._furaticWorkerHandler)worker.removeEventListener('message',owner._furaticWorkerHandler);}catch(_){}try{worker.terminate();}catch(_){}try{if(worker.objectURL)URL.revokeObjectURL(worker.objectURL);}catch(_){}owner._worker=null;owner._furaticWorkerHandler=null;}
     }
-    if(video){video.onplaying=video.onloadedmetadata=video.onerror=null;video.pause();video.srcObject=null;video.removeAttribute('src');video.load();video.remove();video=null;}
+    if(element){try{element.srcObject=null;element.removeAttribute('src');element.load();}catch(_){}element.remove();}
     lastTime=lastProgress=0;
+  }
+  function releaseLease(){leaseAbort?.abort();leaseAbort=null;const release=leaseRelease;leaseRelease=null;if(leaseSupported)leaseOwned=false;release?.();}
+  function acquireLease(){
+    if(leaseOwned||leaseAbort||!active())return;
+    const abort=leaseAbort=new AbortController();
+    navigator.locks.request('furatic-obs-video-'+port,{signal:abort.signal},async()=>{
+      if(abort.signal.aborted||!active())return;
+      leaseOwned=true;
+      await new Promise(resolve=>{leaseRelease=resolve;sync();});
+    }).catch(error=>{
+      // Older/local-file CEF contexts may expose but reject Web Locks. The
+      // backend still enforces one media connection in that case.
+      if(error?.name!=='AbortError'&&leaseAbort===abort){leaseSupported=false;leaseOwned=true;leaseAbort=null;if(active())sync();}
+    }).finally(()=>{if(leaseAbort===abort){leaseAbort=null;leaseOwned=!leaseSupported;}});
+    showStatus('Video is active in another display — waiting…');
   }
   function size(){return {w:innerWidth||1920,h:innerHeight||1080};}
   function applyGeometry(value=geometry){
@@ -49,6 +70,10 @@
     const height=width/ratio;
     const x=clamp((value?.x??.5)*w,width/2,w-width/2),y=clamp((value?.y??.5)*h,height/2,h-height/2);
     root.style.left=x+'px';root.style.top=y+'px';root.style.width=width+'px';root.style.height=height+'px';
+    // Inset beyond the rounded corners/border: only completely covered pixels
+    // can be omitted by the background renderer. No DOM reads in its frame loop.
+    const inset=22;
+    opaqueRect=width>inset*2&&height>inset*2?{left:x-width/2+inset,top:y-height/2+inset,right:x+width/2-inset,bottom:y+height/2-inset}:null;
     root.style.cursor=state?.locked?'default':'move';
     root.dataset.locked=String(Boolean(state?.locked));
   }
@@ -98,20 +123,20 @@
     });
     root.addEventListener('pointermove',move);root.addEventListener('pointerup',endDrag);root.addEventListener('pointercancel',endDrag);root.addEventListener('lostpointercapture',endDrag);
     document.body.appendChild(root);applyGeometry();
-    animate(surface,[{opacity:0,transform:'translateY(18px) scale(.92)',filter:'blur(8px)'},{opacity:1,transform:'none',filter:'none'}],650);
+    animate(surface,[{opacity:0,transform:'translateY(18px) scale(.92)'},{opacity:1,transform:'none'}],650);
   }
   function removeRoot(){
-    clearTimeout(retire);retire=0;teardownPlayer();cancelEffects();
+    clearTimeout(retire);retire=0;teardownPlayer();releaseLease();cancelEffects();
     if(moveFrame)cancelAnimationFrame(moveFrame);moveFrame=0;drag=null;root?.remove();root=surface=status=null;
   }
   function stopDisplay(immediate=false){
     ++loadTicket;shown=false;blockedGeneration=-1;clearTimeout(clientRetry);clientRetry=0;
     clearInterval(watch);watch=0;drag=null;
-    if(!root){teardownPlayer();return;}
+    if(!root){teardownPlayer();releaseLease();return;}
     if(immediate){removeRoot();return;}
     if(retire)return;
     try{player?.pause();}catch(_){}
-    animate(surface,[{opacity:1,transform:'none',filter:'none'},{opacity:0,transform:'translateY(12px) scale(.94)',filter:'blur(7px)'}],400);
+    animate(surface,[{opacity:1,transform:'none'},{opacity:0,transform:'translateY(12px) scale(.94)'}],400);
     surface.style.opacity='0';retire=setTimeout(removeRoot,420);
   }
   function loadLibrary(){
@@ -134,7 +159,7 @@
     if(state.status==='receiving')clientRetry=setTimeout(()=>{clientRetry=0;if(ticket===loadTicket&&active())startPlayer();},Math.min(10000,500*2**Math.min(failures++,5)));
   }
   async function startPlayer(){
-    if(!active()||state.status!=='receiving'||player||clientRetry||blockedGeneration===state.generation)return;const ticket=++loadTicket;
+    if(!active()||!leaseOwned||state.status!=='receiving'||player||clientRetry||blockedGeneration===state.generation)return;const ticket=++loadTicket;
     try{
       const m=await loadLibrary();if(stopped||ticket!==loadTicket||!active())return;
       if(m.LoggingControl)m.LoggingControl.enableAll=false;
@@ -145,12 +170,17 @@
       video.onloadedmetadata=()=>{if(current!==generation||!video)return;if(video.videoWidth&&video.videoHeight){ratio=video.videoWidth/video.videoHeight;applyGeometry();}};
       video.onplaying=()=>{
         if(current!==generation||!video)return;failures=0;showStatus('');lastProgress=performance.now();lastTime=video.currentTime;
-        if(!pictureShown){pictureShown=true;feedback('');video.style.opacity='1';animate(video,[{opacity:0,transform:'scale(.97)',filter:'blur(4px)'},{opacity:1,transform:'none',filter:'none'}],500);}
+        if(!pictureShown){pictureShown=pictureVisible=true;feedback('');video.style.opacity='1';animate(video,[{opacity:0,transform:'scale(.97)'},{opacity:1,transform:'none'}],500);}
       };
       video.onerror=()=>{if(current===generation)reconnectPlayer('Reconnecting…');};
-      player=m.createPlayer({type:'mpegts',isLive:true,url:socketOrigin+'/video/live'},{enableWorker:true,enableWorkerForMSE:false,enableStashBuffer:false,lazyLoad:false,
-        liveBufferLatencyChasing:true,liveBufferLatencyMaxLatency:1,liveBufferLatencyMinRemain:.25,
-        autoCleanupSourceBuffer:true,autoCleanupMaxBackwardDuration:4,autoCleanupMinBackwardDuration:1,fixAudioTimestampGap:false});
+      player=m.createPlayer({type:'mpegts',isLive:true,url:socketOrigin+'/video/live'},{enableWorker:true,enableWorkerForMSE:false,enableStashBuffer:true,stashInitialSize:64,lazyLoad:false,
+        // No continual seeking or accelerated playback: both can make a busy
+        // decoder repeatedly decode ahead instead of presenting steady 60 FPS.
+        liveBufferLatencyChasing:false,liveSync:false,
+        // Keep compressed history behind the active GOP. Removing up to only
+        // one second behind playback can also evict the frames it depends on.
+        autoCleanupSourceBuffer:true,autoCleanupMaxBackwardDuration:8,autoCleanupMinBackwardDuration:4,
+        statisticsInfoReportInterval:2000,fixAudioTimestampGap:false});
       player.on(m.Events.ERROR,(_type,detail)=>{
         if(current!==generation)return;
         if(/unsupported/i.test(String(detail))){blockedGeneration=state.generation;teardownPlayer();showStatus('Video format is not supported by this OBS browser');feedback('The incoming format is not supported by this OBS browser. No transcoding was started.');}
@@ -162,8 +192,13 @@
       watch=setInterval(()=>{
         if(current!==generation||!active()||!video)return;
         if(Math.abs(video.currentTime-lastTime)>.01){lastProgress=performance.now();lastTime=video.currentTime;}
-        if(performance.now()-lastProgress>5000){reconnectPlayer(state.status==='receiving'?'Reloading live video…':'Waiting for video…');return;}
-        try{const b=video.buffered;if(b.length&&b.end(b.length-1)-video.currentTime>1.5)video.currentTime=Math.max(0,b.end(b.length-1)-.3);}catch(_){}
+        if(performance.now()-lastProgress>10000){reconnectPlayer(state.status==='receiving'?'Reloading live video…':'Waiting for video…');return;}
+        // One bounded recovery after a sustained backlog, never a seek on
+        // every buffer update. This releases the old decoder before retrying.
+        try{const b=video.buffered,lead=b.length?b.end(b.length-1)-video.currentTime:0;
+          excessBuffer=lead>6?excessBuffer+1:0;
+          if(excessBuffer>=3)reconnectPlayer('Resuming live video…');
+        }catch(_){}
       },1000);
     }catch(_){if(ticket===loadTicket&&active())reconnectPlayer('Loading video player…');}
   }
@@ -174,6 +209,7 @@
     if(!active()){stopDisplay(!visible());return;}
     if(retire){clearTimeout(retire);retire=0;teardownPlayer();cancelEffects();if(surface){surface.style.opacity='1';animate(surface,[{opacity:0,transform:'scale(.94)'},{opacity:1,transform:'none'}],400);}}
     shown=true;mount();
+    acquireLease();if(!leaseOwned)return;
     if(!drag){geometry=state.geometry;applyGeometry();}
     if(video){video.muted=state.muted;video.volume=state.volume;}
     if(state.generation!==inputGeneration){inputGeneration=state.generation;teardownPlayer();++loadTicket;}
@@ -211,7 +247,8 @@
   }
   function resize(){if(root&&!drag)applyGeometry();}
   function scene(){sync();}
-  window.FuraticOBSVideo={get active(){return shown;},get layout(){return state?.layout||'default';}};
+  window.FuraticOBSVideo={get active(){return shown;},get layout(){return state?.layout||'default';},
+    get opaqueRect(){return active()&&shown&&pictureVisible&&video?.style.opacity==='1'&&!effects.size?opaqueRect:null;}};
   window.addEventListener('obsSourceVisibleChanged',visibility);document.addEventListener('visibilitychange',visibility);
   window.addEventListener('resize',resize);window.addEventListener('blur',endDrag);window.addEventListener('furatic:scenechange',scene);
   window.addEventListener('pagehide',()=>{
