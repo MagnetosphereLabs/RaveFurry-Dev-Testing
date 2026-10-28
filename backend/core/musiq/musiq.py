@@ -546,6 +546,7 @@ def _add_color_indication(engagement, song_dict) -> None:
 
 def state_dict() -> Dict[str, Any]:
     """Extends the base state with musiq-specific information and returns it."""
+    from core.musiq.song_cache import display_artwork
     state = base.state_dict()
 
     musiq_state: Dict[str, Any] = {}
@@ -561,6 +562,7 @@ def state_dict() -> Dict[str, Any]:
     try:
         current_song = CurrentSong.objects.get()
         current_song_dict = model_to_dict(current_song)
+        current_song_dict['artwork_url'] = display_artwork(current_song.external_url, current_song.artwork_url)
         current_song_dict["occurrence_id"] = str(current_song.occurrence_id)
         current_song_dict = util.camelize(current_song_dict)
 
@@ -622,6 +624,7 @@ def state_dict() -> Dict[str, Any]:
             # Reserve ownership/limits privately until the downloaded song is ready.
             continue
         song_dict = model_to_dict(song)
+        song_dict['artwork_url'] = display_artwork(song.external_url, song.artwork_url)
         song_dict["occurrence_id"] = str(song.occurrence_id)
         song_dict = util.camelize(song_dict)
         song_dict["isNextUpLocked"] = locked_queue_key is not None and song.id == locked_queue_key

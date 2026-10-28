@@ -405,6 +405,8 @@ class YoutubeSongProvider(SongProvider, Youtube):
         # Complete local credits are authoritative for an already downloaded video.
         # Lyrics/artwork backfill runs independently; playback needs no provider.
         if not getattr(self, 'force_metadata_refresh', False) and self.check_cached() and metadata.get('title') and float(metadata.get('duration') or 0) > 0:
+            from core.musiq.song_cache import display_artwork
+            metadata['artwork_url'] = display_artwork(self.get_external_url(), metadata.get('artwork_url', ''))
             self.metadata = metadata
             return True
 

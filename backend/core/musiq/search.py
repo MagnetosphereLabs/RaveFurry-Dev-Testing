@@ -22,7 +22,7 @@ _lock = threading.RLock()
 _cache = OrderedDict()
 PAGE = 5
 TTL = 300
-MAX_RESULTS = 100
+MAX_RESULTS = 25
 
 
 def _row(video, title, artist, duration, artwork, cached=False):
@@ -50,7 +50,7 @@ def _local(query):
     rows = []
     for song in song_cache.local_matches(query, limit=MAX_RESULTS):
         item = _row(youtube_video_id(song.url), song.title, song.artist, song.duration,
-                    (song.cached_metadata or {}).get('artwork_url', ''), True)
+                    song_cache.display_artwork(song.url, (song.cached_metadata or {}).get('artwork_url', '')), True)
         if item:
             rows.append(item)
     return rows
@@ -153,14 +153,14 @@ def search(request):
                 while len(_cache) > 128:
                     _cache.popitem(last=False)
     with _lock:
-        needs = len(entry['rows']) < offset + PAGE
+        needs = offset < MAX_RESULTS and len(entry['rows']) < min(MAX_RESULTS, offset + PAGE)
         if needs and not entry['running'] and not entry['exhausted'] and now >= entry['retryAt'] and _slots.acquire(blocking=False):
             entry['running'] = True
             _pool.submit(_lookup, entry, min(MAX_RESULTS, entry['limit'] + 20))
-        rows = list(entry['rows'][offset:offset + PAGE])
-        pending = len(rows) < PAGE and (entry['running'] or not entry['exhausted'] and not entry['error'])
+        rows = list(entry['rows'][offset:min(MAX_RESULTS, offset + PAGE)])
+        pending = offset + len(rows) < MAX_RESULTS and len(rows) < PAGE and (entry['running'] or not entry['exhausted'] and not entry['error'])
         next_offset = offset + len(rows)
-        more = next_offset < len(entry['rows']) or not entry['exhausted'] and not entry['error']
+        more = next_offset < MAX_RESULTS and (next_offset < len(entry['rows']) or not entry['exhausted'] and not entry['error'])
         cursor = signing.dumps({'key': entry['key'], 'offset': next_offset}, salt='song-search') if more else None
         value = {'results': rows, 'next': cursor, 'pending': pending,
                  'message': 'Search is temporarily unavailable. You can still submit a link or search text.' if entry['error'] else ''}

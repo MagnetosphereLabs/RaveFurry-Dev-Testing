@@ -1,12 +1,13 @@
 """Durable per-video data shared by search, playback, moderation and OBS."""
 from pathlib import Path
+from functools import lru_cache
 import re
 import unicodedata
 from urllib.parse import urlparse
 
 from django.conf import settings
 from django.db.models import Q
-from django.http import FileResponse, Http404
+from django.http import FileResponse, Http404, HttpResponseRedirect
 from core.input_validation import VIDEO_ID, youtube_video_id
 
 
@@ -65,11 +66,70 @@ def artwork_url(video):
     return '/song-artwork/' + video + '/'
 
 
+def display_artwork(url, source=''):
+    """Old audio archives may have credits but no saved thumbnail URL."""
+    if source:
+        return source
+    try:
+        return artwork_url(youtube_video_id(url))
+    except (ValueError, TypeError):
+        return ''
+
+
+def _write_artwork(path, data):
+    import os
+    import tempfile
+    if not data or len(data) > 2 * 1024 * 1024:
+        return False
+    if not (data[:3] == b'\xff\xd8\xff' or data[:8] == b'\x89PNG\r\n\x1a\n' or data[:4] == b'RIFF' and data[8:12] == b'WEBP'):
+        return False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle, temporary = tempfile.mkstemp(dir=path.parent, suffix='.tmp')
+    try:
+        with os.fdopen(handle, 'wb') as target:
+            target.write(data)
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+    return True
+
+
+@lru_cache(maxsize=256)
+def _recover_embedded_artwork(video, signature):
+    """yt-dlp already embeds covers in M4A files; recover once per file version."""
+    from mutagen import MutagenError
+    from mutagen.mp4 import MP4
+    try:
+        tags = MP4(Path(settings.SONGS_CACHE_DIR) / (video + '.m4a')).tags or {}
+        covers = tags.get('covr') or []
+        return bool(covers and _write_artwork(artwork_path(video), bytes(covers[0])))
+    except (MutagenError, OSError, ValueError):
+        return False
+
+
+def ensure_artwork(video):
+    path = artwork_path(video)
+    if path.is_file() and path.stat().st_size:
+        return path
+    try:
+        audio = Path(settings.SONGS_CACHE_DIR) / (video + '.m4a')
+        stat = audio.stat()
+        _recover_embedded_artwork(video, (str(audio.resolve()), stat.st_mtime_ns, stat.st_size))
+    except OSError:
+        pass
+    return path if path.is_file() and path.stat().st_size else None
+
+
 def artwork(request, video):
     try:
-        path = artwork_path(video)
-        if not path.is_file():
-            raise Http404
+        path = ensure_artwork(video)
+        if path is None:
+            # A fixed provider thumbnail also repairs old chart/history links.
+            # This never performs an arbitrary URL fetch on the web server.
+            response = HttpResponseRedirect('https://i.ytimg.com/vi/' + video + '/hqdefault.jpg')
+            response['Cache-Control'] = 'public, max-age=60'
+            return response
         with path.open('rb') as source:
             header = source.read(12)
         mime = 'image/png' if header.startswith(b'\x89PNG') else 'image/webp' if header.startswith(b'RIFF') else 'image/jpeg'
@@ -84,12 +144,12 @@ def artwork(request, video):
 def save_artwork(row, source):
     """Fetch only provider image hosts; bound bytes before buffering to disk."""
     import requests
-    import os
-    import tempfile
     video = youtube_video_id(row.url)
     path = artwork_path(video)
-    if path.is_file() and path.stat().st_size:
+    if ensure_artwork(video):
         return artwork_url(video)
+    if not source or source.startswith('/song-artwork/'):
+        source = (row.cached_metadata or {}).get('artwork_source') or 'https://i.ytimg.com/vi/' + video + '/hqdefault.jpg'
     parsed = urlparse(source or '')
     host = (parsed.hostname or '').lower()
     if parsed.scheme != 'https' or not (host == 'yt3.ggpht.com' or host.endswith('.ytimg.com') or host.endswith('.googleusercontent.com') or host.endswith('.ggpht.com')):
@@ -104,17 +164,8 @@ def save_artwork(row, source):
                 data.extend(chunk)
                 if len(data) > 2 * 1024 * 1024:
                     return ''
-            if not (data[:3] == b'\xff\xd8\xff' or data[:8] == b'\x89PNG\r\n\x1a\n' or data[:4] == b'RIFF'):
+            if not _write_artwork(path, data):
                 return ''
-            path.parent.mkdir(parents=True, exist_ok=True)
-            handle, temporary = tempfile.mkstemp(dir=path.parent, suffix='.tmp')
-            try:
-                with os.fdopen(handle, 'wb') as target:
-                    target.write(data)
-                os.replace(temporary, path)
-            finally:
-                if os.path.exists(temporary):
-                    os.unlink(temporary)
         return artwork_url(video)
     except (requests.RequestException, OSError):
         return ''

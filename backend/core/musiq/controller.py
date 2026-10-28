@@ -578,6 +578,7 @@ def vote(request: WSGIRequest) -> HttpResponse:
 def played_history(request: WSGIRequest) -> HttpResponse:
     """Return the bounded event timeline and authoritative personal vote states."""
     from core import voting
+    from core.musiq.song_cache import display_artwork
 
     try:
         page = _poll_history()
@@ -586,7 +587,7 @@ def played_history(request: WSGIRequest) -> HttpResponse:
     response = JsonResponse({"songs": [{
         "id": row.id, "artist": row.artist, "title": row.title,
         "occurrenceId": str(row.occurrence_id), "votes": row.votes,
-        "externalUrl": row.external_url, "artworkUrl": row.artwork_url,
+        "externalUrl": row.external_url, "artworkUrl": display_artwork(row.external_url, row.artwork_url),
         "duration": row.duration, "endedAt": row.ended_at.isoformat(),
         "outcome": row.outcome,
     } for row in page], "nextCursor": None, "myVotes": voting.personal_state(request, page)})
