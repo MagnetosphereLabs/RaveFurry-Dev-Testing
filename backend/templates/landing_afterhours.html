@@ -1,3 +1,4 @@
+{% load static %}
 <!doctype html>
 <html lang="en">
   <head>
@@ -429,7 +430,8 @@
         }
       }
     </style>
-  </head>
+  <script src="{% static 'traffic-feedback.js' %}?v={{ static_asset_version }}"></script>
+</head>
   <body>
     <canvas id="aurora" aria-hidden="true"></canvas>
     <div class="noise" aria-hidden="true"></div>
@@ -978,6 +980,7 @@
       }
 
       async function refreshTopSongs(force) {
+        if (document.hidden && !force) return;
         if (topSongsInFlight && !force) return;
         if (force && eventAbort) eventAbort.abort();
         topSongsInFlight = true;
@@ -1017,21 +1020,26 @@
         listAnimations.clear();
       });
 
+      let modeRequest = null;
       async function pollMode() {
+        if (document.hidden || modeRequest) return;
+        const controller = new AbortController(); modeRequest = controller;
+        const timeout = setTimeout(() => controller.abort(), 8000);
         try {
-          const response = await fetch("/api/site-mode/", { cache: "no-store" });
+          const response = await fetch("/api/site-mode/", {cache: "no-store", signal: controller.signal});
           if (!response.ok) return;
           const data = await response.json();
-          if (data.mode === "event") {
-            window.location.replace("/");
-          }
-        } catch (_error) {
-          // silent retry
-        }
+          if (data.mode === "event") window.location.replace("/");
+        } catch (_error) { /* Reconnect on the next ordinary poll. */ }
+        finally { clearTimeout(timeout); if (modeRequest === controller) modeRequest = null; }
       }
+      document.addEventListener('visibilitychange', () => {
+        if (document.hidden) { modeRequest?.abort(); eventAbort?.abort(); }
+        else { pollMode(); refreshTopSongs(); }
+      });
 
       pollMode();
-      setInterval(pollMode, 3000);
+      setInterval(pollMode, 7000);
       refreshTopSongs();
       setInterval(refreshTopSongs, 60000);
     </script>

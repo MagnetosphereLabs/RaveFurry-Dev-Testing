@@ -1809,8 +1809,7 @@
             shell.classList.add("furatic-shell-mounted");
         });
     }
-    const OWN_SONG_POLL_MS = 3500;
-    const OWN_SONG_REFRESH_BURST = [260, 900, 1800];
+    const OWN_SONG_POLL_MS = 8000;
     const ownQueueKeys = new Set();
     const pendingRemovals = new Set();
 
@@ -2558,7 +2557,7 @@
             applyOwnSongState(window.furaticTutorialOwnState || {});
             return;
         }
-        if (ownStateInFlight) return;
+        if (document.hidden || ownStateInFlight) return;
         ownStateInFlight = true;
         const abort = new AbortController();
         const timeout = window.setTimeout(() => abort.abort(), 9000);
@@ -2570,17 +2569,7 @@
         }
 
         try {
-            const response = await fetch(ownSongStateUrl, {
-                signal: abort.signal,
-                credentials: "same-origin",
-                cache: "no-store"
-            });
-
-            if (!response.ok) {
-                return;
-            }
-
-            const data = await response.json();
+            const data = await window.furaticReadPersonalState();
 
             applyOwnSongState(data);
         } catch (_error) {
@@ -2589,12 +2578,6 @@
             ownStateInFlight = false;
             window.clearTimeout(timeout);
         }
-    }
-
-    function scheduleRefreshBurst() {
-        OWN_SONG_REFRESH_BURST.forEach(function (delay) {
-            window.setTimeout(refreshOwnSongState, delay);
-        });
     }
 
     async function removeOwnSong(key, row, button) {
@@ -2646,32 +2629,8 @@
         }
     }
 
-    document.addEventListener("pointerdown", function (event) {
-        const target = targetElement(event);
-        if (!target) {
-            return;
-        }
-
-        const submitButton = target.closest("#request-button-container, #request-new-music, #request-archived-music");
-        if (!submitButton) {
-            return;
-        }
-
-        scheduleRefreshBurst();
-    }, { passive: true });
-
-    document.addEventListener("keydown", function (event) {
-        if (event.key !== "Enter") {
-            return;
-        }
-
-        const target = targetElement(event);
-        if (!target || !target.closest("#music-input")) {
-            return;
-        }
-
-        scheduleRefreshBurst();
-    });
+    document.addEventListener("furatic:music-request-settled", refreshOwnSongState);
+    document.addEventListener("visibilitychange", () => { if (!document.hidden) refreshOwnSongState(); });
 
     document.addEventListener("click", function (event) {
         const target = targetElement(event);

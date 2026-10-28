@@ -62,7 +62,11 @@
 		
 		<title>Raveberry</title>
 		<link id="favicon" rel="shortcut icon" href="{% static "raveberry.svg" %}"/>
-	</head>
+	<script src="{% static 'notification-feed.js' %}?v={{ static_asset_version }}"></script>
+<link rel="stylesheet" href="{% static 'song-search.css' %}?v={{ static_asset_version }}">
+<link rel="stylesheet" href="{% static 'event-font.css' %}?v={{ static_asset_version }}">
+<script src="{% static 'traffic-feedback.js' %}?v={{ static_asset_version }}"></script>
+</head>
 	<body>
 		<div id="disconnected-banner" class="information-banner">
 			<i class="fas fa-exclamation-circle"></i>

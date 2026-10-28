@@ -1,3 +1,4 @@
+{% load static %}
 <!doctype html>
 <html lang="en">
   <head>
@@ -911,7 +912,8 @@
       @media(prefers-reduced-motion: reduce) { .bounded-activity-list, .activity-expand span, input.account-switch, input.account-switch::before, .account-role-option { transition: none; } .activity-new { animation: none; } }
 
     </style>
-  </head>
+  <script src="{% static 'traffic-feedback.js' %}?v={{ static_asset_version }}"></script>
+</head>
   <body>
     <main class="page">
       <div class="shell">
@@ -1294,7 +1296,7 @@
         );
         if (!refreshInFlight) {
           window.clearTimeout(refreshTimer);
-          refreshTimer = window.setTimeout(refreshState, 1500);
+          refreshTimer = window.setTimeout(refreshState, reconnectDelay());
         }
       }
 
@@ -2239,6 +2241,8 @@
         renderBlocklists(blocklists);
       }
 
+      let reconnectAttempt = 0;
+      const reconnectDelay = () => [3000, 6000, 12000, 15000][Math.min(reconnectAttempt++, 3)];
       let refreshInFlight = false;
       let refreshTimer = 0;
       async function refreshState() {
@@ -2261,6 +2265,7 @@
 
           const data = await parseModeratorJsonResponse(response);
           renderState(data);
+          reconnectAttempt = 0;
 
           if (connectionOverlayMode === "server-down") {
             showConnectionRestoredOverlay();
@@ -2277,7 +2282,7 @@
           window.clearTimeout(timeout);
           refreshInFlight = false;
           if (!loginRedirectScheduled) {
-            refreshTimer = window.setTimeout(refreshState, connectionOverlayMode === "server-down" ? 1500 : 6000);
+            refreshTimer = window.setTimeout(refreshState, connectionOverlayMode === "server-down" ? reconnectDelay() : 6000);
           }
         }
       }
