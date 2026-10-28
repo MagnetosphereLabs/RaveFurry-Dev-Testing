@@ -13,13 +13,14 @@ import os
 from pathlib import Path
 import re
 import secrets
-import shutil
 import subprocess
 import tempfile
 import time
 from urllib.parse import urlencode
 
 from aiohttp import web, WSMsgType
+
+from .srt_runtime import SRTRuntime, RuntimeSetupError, owns_udp_port
 
 HERE = Path(__file__).parent
 MAX_QUEUE = 32  # 32 x 64 KiB, shared immutable bytes, per media client.
@@ -32,9 +33,9 @@ def settings_path():
 
 
 def defaults():
-    event = dict(name='Germany / Event', bind='0.0.0.0', port=9000,
+    event = dict(name='Event stream', bind='0.0.0.0', port=9000,
                  passphrase='67d6de062dbbe0c0fe8df5a6539b359b', senderIp='', latency=120)
-    test = dict(event, name='Local / VPN test', passphrase='FuraticLocalTest9000')
+    test = dict(event, name='Test stream', passphrase='FuraticLocalTest9000')
     return dict(version=1, layout='default', enabled=True, activeProfile='event',
                 profiles={'event': event, 'test': test}, volume=.75, muted=False,
                 locked=False, geometry={'x': .5, 'y': .5, 'width': 0})
@@ -129,6 +130,12 @@ class VideoReceiver:
             pass
         except (OSError, ValueError, TypeError):
             self.load_error = 'Saved video settings could not be loaded; defaults are active. Save to repair.'
+        # Rename only the original stock labels; retain team-assigned names/credentials.
+        for key, old, new in [('event', 'Germany / Event', 'Event stream'), ('test', 'Local / VPN test', 'Test stream')]:
+            if self.config['profiles'].get(key, {}).get('name') == old:
+                self.config['profiles'][key]['name'] = new
+        self.runtime = SRTRuntime(self.path.parent)
+        self.listener_ready = False
         self.token = secrets.token_urlsafe(32)
         self.revision = 0
         self.status, self.detail = 'off', 'Default layout — receiver stopped'
@@ -160,9 +167,11 @@ class VideoReceiver:
         result = {'revision': self.revision, 'layout': c['layout'], 'enabled': c['enabled'],
                   'volume': c['volume'], 'muted': c['muted'], 'locked': c['locked'],
                   'geometry': c['geometry'], 'status': self.status, 'detail': self.detail,
+                  'listenerReady': self.listener_ready and self.active,
+                  'runtimeReady': bool(self.runtime.executable),
                   'generation': self.generation, 'media': self.info, 'suspended': self.suspended,
                   'warning': self.load_error, 'playbackError': self.playback_error}
-        if private: result.update(config=copy.deepcopy(c), token=self.token, windows=os.name == 'nt')
+        if private: result.update(config=copy.deepcopy(c), token=self.token, windows=os.name == 'nt', receiverExecutable=self.runtime.executable or '')
         return result
 
     def changed(self):
@@ -275,17 +284,45 @@ class VideoReceiver:
                 self.wake.clear()
                 if not self.active:
                     await self.wake.wait(); continue
-                executable = shutil.which('ffmpeg')
-                if not executable:
-                    self.status_to('error', 'FFmpeg is missing from the Furatic environment. Re-run the installer.')
+                self.listener_ready = False
+                self.status_to('preparing', 'Checking SRT receiver…')
+                prepare = asyncio.create_task(self.runtime.resolve(lambda detail: self.status_to('preparing', detail)))
+                changed = asyncio.create_task(self.wake.wait())
+                try:
+                    await asyncio.wait([prepare, changed], return_when=asyncio.FIRST_COMPLETED)
+                    if changed.done(): continue
+                    executable = prepare.result()
+                except RuntimeSetupError as error:
+                    self.status_to('setup_error', str(error))
                     await self.wake.wait(); continue
-                self.reset_media(); self.status_to('waiting', 'Waiting for the SRT sender')
+                except (OSError, ValueError):
+                    self.status_to('setup_error', 'Receiver setup could not access its files. Check this PC’s write permissions, then retry setup.')
+                    await self.wake.wait(); continue
+                finally:
+                    for task in (prepare, changed): task.cancel()
+                    await asyncio.gather(prepare, changed, return_exceptions=True)
+                if not self.active: continue
+                self.reset_media(); self.status_to('starting', f"Opening UDP port {self.profile()['port']}…")
                 job = None; tasks = []
                 try:
                     self.process = await asyncio.create_subprocess_exec(*self.command(executable),
                         stdin=subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
                         limit=65536, creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
                     job = WindowsJob(self.process.pid)
+                    async def listening():
+                        # A verified binary alone is insufficient: wait for this child's
+                        # actual socket before telling the operator to start their sender.
+                        for _ in range(200):
+                            if self.process.returncode is not None: return
+                            owned = owns_udp_port(self.process.pid, self.profile()['port'])
+                            if owned is True or owned is None:
+                                self.listener_ready = owned is True
+                                if not self.last_packet:
+                                    self.status_to('waiting', f"Ready to receive on UDP {self.profile()['port']}" if owned else 'Receiver running — waiting for sender')
+                                else: self.changed()
+                                await asyncio.Event().wait()
+                            await asyncio.sleep(.05)
+                        self.status_to('error', f"Could not open UDP {self.profile()['port']}. Release the old OBS SRT Media Source and retry.")
                     async def output():
                         while True:
                             try: data = await asyncio.wait_for(self.process.stdout.read(65536), 8)
@@ -313,18 +350,22 @@ class VideoReceiver:
                             if 'address already in use' in lower or 'bind' in lower and 'fail' in lower:
                                 self.status_to('error', 'UDP port is busy. Release the old OBS SRT Media Source.')
                             elif 'protocol not found' in lower or 'unknown protocol' in lower:
-                                self.status_to('error', 'This FFmpeg build lacks SRT support. Install an SRT-enabled FFmpeg build.')
+                                self.status_to('error', 'SRT receiver support could not load. Retry receiver setup.')
                             elif 'password' in lower or 'passphrase' in lower or 'encryption' in lower and 'reject' in lower:
                                 self.status_to('error', 'SRT encryption handshake failed. Check the selected profile password.')
                     tasks = [asyncio.create_task(output()), asyncio.create_task(errors()),
-                             asyncio.create_task(self.process.wait()), asyncio.create_task(self.wake.wait())]
-                    await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                             asyncio.create_task(self.process.wait()), asyncio.create_task(self.wake.wait()),
+                             asyncio.create_task(listening())]
+                    done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                    for finished in done:
+                        if not finished.cancelled() and finished.exception(): raise finished.exception()
                     if self.last_packet: retry = 1
                 except asyncio.CancelledError:
                     raise
                 except Exception:
                     self.status_to('error', 'The SRT receiver could not start or the stream stopped. Check FFmpeg, firewall, and sender settings.')
                 finally:
+                    self.listener_ready = False
                     await self.stop_process()
                     if len(tasks)>1:
                         with contextlib.suppress(asyncio.TimeoutError, Exception): await asyncio.wait_for(asyncio.shield(tasks[1]), .25)
@@ -444,8 +485,8 @@ def install_routes(app, receiver, port):
         if os.name != 'nt': return web.json_response({'message':'On this computer, allow inbound UDP on the selected receiver port in its firewall.'})
         if receiver.firewall_task and not receiver.firewall_task.done():
             raise web.HTTPConflict(text='A firewall permission request is already open')
-        executable = shutil.which('ffmpeg')
-        if not executable: raise web.HTTPServiceUnavailable(text='FFmpeg is not installed in this environment')
+        executable = receiver.runtime.executable
+        if not executable: raise web.HTTPConflict(text='Select Video layout and let receiver setup finish before allowing it in Windows Firewall.')
         p = receiver.profile()
         # JSON -> base64 -> fixed PowerShell code; no user text becomes shell code.
         payload = base64.b64encode(json.dumps({'program':str(Path(executable).resolve()),'port':p['port'],'remote':p['senderIp'] or 'Any'}).encode()).decode()
@@ -466,6 +507,14 @@ def install_routes(app, receiver, port):
         if code: raise web.HTTPBadRequest(text='Windows firewall permission was declined or failed. You can retry.')
         return web.json_response({'message':'UDP firewall permission saved for this profile. Reapply after changing its port or sender-IP restriction.'})
 
+    async def retry(request):
+        authorize(request)
+        if not receiver.active: raise web.HTTPConflict(text='Select Video layout and enable the receiver first.')
+        if receiver.status not in ('error', 'setup_error'):
+            raise web.HTTPConflict(text='The receiver is already starting or running.')
+        receiver.wake.set()
+        return web.json_response({'message':'Retrying receiver…'})
+
     async def start(app): await receiver.start()
     async def stop(app):
         await receiver.close()
@@ -477,6 +526,7 @@ def install_routes(app, receiver, port):
     app.router.add_post('/video/settings', update)
     app.router.add_post('/video/playback', playback)
     app.router.add_post('/video/firewall', firewall)
+    app.router.add_post('/video/retry', retry)
     app.router.add_get('/video/events', events)
     app.router.add_get('/video/live', media)
     app.on_startup.append(start); app.on_shutdown.append(stop)
