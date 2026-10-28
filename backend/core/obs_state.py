@@ -66,7 +66,9 @@ def publish(song, mode, message, *, queue_empty, paused, alarm=False, backup=Fal
     try:
         # One decoded cover is held by the companion; re-send only after a song
         # change/restart. No per-frame disk reads and no per-queue file copies.
-        path = song_cache.artwork_path(video)
+        path = song_cache.ensure_artwork(video)
+        if path is None:
+            return
         with _artwork_lock:
             global _artwork
             stat = path.stat()

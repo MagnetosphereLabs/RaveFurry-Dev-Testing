@@ -144,6 +144,7 @@ def _active(start, mode):
 
 
 def _capture(active, now):
+    from core.musiq.song_cache import display_artwork
     start = _date(active["startedAt"])
     end = _date(active["endedAt"]) if active.get("endedAt") else now
     fields = ("occurrence_id", "external_url", "artist", "title", "artwork_url", "votes", "duration")
@@ -161,12 +162,13 @@ def _capture(active, now):
     for index, row in enumerate(current + rows):
         artist, title = clean_display_names(row["artist"], row["title"])
         title, artist = title or "Untitled song", artist or "Unknown artist"
+        row['artwork_url'] = display_artwork(row['external_url'], row['artwork_url'])
         key = row["external_url"] or (artist, title)
         if key not in songs:
-            songs[key] = {"title": title, "artist": artist, "artworkUrl": row["artwork_url"], "votes": 0}
+            songs[key] = {"title": title, "artist": artist, "artworkUrl": row["artwork_url"], "externalUrl": row["external_url"], "votes": 0}
         songs[key]["votes"] += int(row["votes"] or 0)
         if index >= len(current) and len(history) < 50:
-            history.append({"id": str(row["occurrence_id"]), "title": title, "artist": artist,
+            history.append({"id": str(row["occurrence_id"]), "title": title, "artist": artist, "externalUrl": row["external_url"],
                             "artworkUrl": row["artwork_url"], "votes": int(row["votes"] or 0),
                             "duration": row["duration"], "endedAt": row["ended_at"].isoformat(),
                             "outcome": row["outcome"]})
@@ -217,6 +219,23 @@ def sync_mode(mode):
         LOGGER.exception("could not save event charts; existing archive preserved")
 
 
+def _repair_chart_artwork(rows):
+    """Repair pre-update saved charts in the response, without rewriting them."""
+    from django.db.models import Q
+    from core.musiq.song_cache import display_artwork
+    missing = [row for row in rows if not row.get('artworkUrl')]
+    if not missing:
+        return
+    titles = {row['title'] for row in missing}
+    artists = {row['artist'] for row in missing}
+    candidates = models.ArchivedSong.objects.filter(Q(title__in=titles) | Q(artist__in=artists)).only('url', 'artist', 'title', 'cached_metadata')[:1000]
+    matches = {clean_display_names(row.artist, row.title): row for row in candidates}
+    for row in missing:
+        archived = matches.get((row['artist'], row['title']))
+        url = row.get('externalUrl') or (archived.url if archived else '')
+        row['artworkUrl'] = display_artwork(url, (archived.cached_metadata or {}).get('artwork_url', '') if archived else '')
+
+
 def public_data(event_id=None):
     """One selected chart/history and only the event dates actually available."""
     data = _read()
@@ -234,6 +253,8 @@ def public_data(event_id=None):
     selected = next((event for event in events if event["id"] == event_id), None)
     if selected is None:
         selected = events[0] if events else None
+    if selected:
+        _repair_chart_artwork(selected['songs'] + selected['history'])
     return {"events": [{key: event[key] for key in ("id", "startedAt", "endedAt")} for event in events],
             "eventId": selected["id"] if selected else None,
             "songs": selected["songs"] if selected else [],

@@ -31,6 +31,7 @@ def _queue_queryset():
 
 
 def _serialize_song(song, include_details: bool = False) -> Dict[str, Any]:
+    from core.musiq.song_cache import display_artwork
     queue_key = getattr(song, "queue_key", None) or getattr(song, "id")
     payload = {
         "queueKey": queue_key,
@@ -47,7 +48,7 @@ def _serialize_song(song, include_details: bool = False) -> Dict[str, Any]:
         "reviewReason": getattr(song, "review_reason", ""),
         "profanityCount": getattr(song, "profanity_count", 0),
         "slurCount": getattr(song, "slur_count", 0),
-        "artworkUrl": getattr(song, "artwork_url", ""),
+        "artworkUrl": display_artwork(song.external_url, getattr(song, "artwork_url", "")),
         "genre": getattr(song, "genre", ""),
         "priorityTier": getattr(song, "priority_tier", "normal"),
     }

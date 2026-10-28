@@ -61,13 +61,14 @@ class ArchivedSong(models.Model):
 
     def get_metadata(self) -> "Metadata":
         """Return the combined Metadata object of this song."""
+        from core.musiq.song_cache import display_artwork
         return {
             "artist": self.artist,
             "title": self.title,
             "duration": self.duration,
             "external_url": self.url,
             "cached": self.cached,
-            "artwork_url": (self.cached_metadata or {}).get("artwork_url", ""),
+            "artwork_url": display_artwork(self.url, (self.cached_metadata or {}).get("artwork_url", "")),
             "genre": (self.cached_metadata or {}).get("genre", ""),
         }
 
