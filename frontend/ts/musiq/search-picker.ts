@@ -14,7 +14,9 @@ export function installSearchPicker(): boolean {
   panel.id = 'furatic-search-picker'; panel.className = 'furatic-search-picker';
   panel.setAttribute('aria-label', 'Song search results'); panel.setAttribute('aria-hidden', 'true');
   panel.innerHTML = '<div class="song-search-scroll" role="listbox" id="song-search-results" aria-label="Choose a song"></div><div class="song-search-status" role="status"></div>';
-  document.body.appendChild(panel);
+  // Share the input's stacking context so one glass surface can sit behind
+  // both regions. The existing input and queue nodes stay in their places.
+  (card.closest('.furatic-embed-shell') || document.body).appendChild(panel);
   const list = panel.querySelector<HTMLElement>('.song-search-scroll');
   const status = panel.querySelector<HTMLElement>('.song-search-status');
   input.setAttribute('role', 'combobox'); input.setAttribute('aria-autocomplete', 'list');
@@ -23,27 +25,44 @@ export function installSearchPicker(): boolean {
   let timer = 0, pendingTimer = 0, startedTyping = 0, lastLookup = 0, generation = 0;
   let request: AbortController = null, opened = false, loading = false, selecting = false;
   const reduced = window.matchMedia('(prefers-reduced-motion: reduce)');
-  const cornerMotion = reduced.matches ? '0ms' : '380ms';
-  card.style.transition = getComputedStyle(card).transition + ', border-bottom-left-radius ' + cornerMotion + ' cubic-bezier(.22,1,.36,1), border-bottom-right-radius ' + cornerMotion + ' cubic-bezier(.22,1,.36,1)';
+  const maxResults = 25;
+  const inputGroup = card.parentElement;
+  let closingTimer = 0;
   const eligible = (text: string) => /[\p{L}\p{N}]/u.test(text) && !/https?:\/\//i.test(text);
   function position() {
     if (!opened) return;
     const bounds = card.getBoundingClientRect();
-    panel.style.left = bounds.left + 'px'; panel.style.top = bounds.bottom - 1 + 'px';
+    panel.style.left = bounds.left + 'px'; panel.style.top = bounds.top + 'px';
     panel.style.width = bounds.width + 'px';
-    const available = Math.max(0, window.innerHeight - bounds.bottom - 12);
-    const height = Math.min(available, window.innerHeight < 550 ? 222 : 304, list.scrollHeight + 44);
-    panel.style.height = height + 'px';
+    panel.style.setProperty('--search-input-height', bounds.height + 'px');
+    panel.style.setProperty('--search-radius', getComputedStyle(card).borderTopLeftRadius || '18px');
+    const footer = status.textContent ? 38 : 0;
+    const available = Math.max(0, window.innerHeight - bounds.bottom - 28 - footer);
+    const rowHeight = available < 228 ? 64 : 76;
+    const rows = Math.min(3, Math.max(1, Math.floor(available / rowHeight)), items.length);
+    panel.style.setProperty('--search-row-height', rowHeight + 'px');
+    list.style.height = rows * rowHeight + 'px';
+    panel.style.height = bounds.height + 18 + rows * rowHeight + footer + 'px';
   }
   function open() {
+    window.clearTimeout(closingTimer);
+    if (!opened) {
+      panel.style.height = card.getBoundingClientRect().height + 'px';
+      void panel.offsetHeight; // Start the expansion at the original input outline.
+    }
     opened = true;
     panel.classList.add('is-open'); card.classList.add('has-search-picker');
+    inputGroup.classList.add('has-search-surface');
     panel.setAttribute('aria-hidden', 'false'); input.setAttribute('aria-expanded', 'true');
     position();
   }
   function close() {
-    opened = false; panel.classList.remove('is-open'); card.classList.remove('has-search-picker');
-    panel.style.height = '0px'; panel.setAttribute('aria-hidden', 'true');
+    opened = false; panel.classList.remove('is-open');
+    panel.style.height = card.getBoundingClientRect().height + 'px'; panel.setAttribute('aria-hidden', 'true');
+    window.clearTimeout(closingTimer);
+    closingTimer = window.setTimeout(() => {
+      card.classList.remove('has-search-picker'); inputGroup.classList.remove('has-search-surface');
+    }, reduced.matches ? 0 : 520);
     input.setAttribute('aria-expanded', 'false'); input.removeAttribute('aria-activedescendant');
     selected = -1;
   }
@@ -54,7 +73,7 @@ export function installSearchPicker(): boolean {
   function showStatus(text: string, spinner = false) {
     status.replaceChildren(); status.classList.toggle('is-loading', spinner);
     if (spinner) { const spin = document.createElement('span'); spin.className = 'song-search-spinner'; spin.setAttribute('aria-hidden', 'true'); status.appendChild(spin); }
-    status.appendChild(document.createTextNode(text));
+    status.appendChild(document.createTextNode(text)); status.hidden = !text;
     position();
   }
   function highlight(index: number) {
@@ -67,7 +86,7 @@ export function installSearchPicker(): boolean {
   function append(rows: Result[]) {
     const ids = new Set(items.map(row => row.videoId));
     rows.forEach(item => {
-      if (!/^[A-Za-z0-9_-]{11}$/.test(item.videoId) || ids.has(item.videoId)) return;
+      if (items.length >= maxResults || !/^[A-Za-z0-9_-]{11}$/.test(item.videoId) || ids.has(item.videoId)) return;
       ids.add(item.videoId); const index = items.length; items.push(item);
       const row = document.createElement('button'); row.type = 'button'; row.className = 'song-search-row';
       row.id = 'song-search-result-' + index; row.setAttribute('role', 'option'); row.setAttribute('aria-selected', 'false');
@@ -101,7 +120,7 @@ export function installSearchPicker(): boolean {
     }).always(() => { selecting = false; });
   }
   async function load(more = false) {
-    if (loading || document.hidden || !eligible(query) || (more && !cursor)) return;
+    if (loading || document.hidden || !eligible(query) || (more && (!cursor || items.length >= maxResults))) return;
     loading = true; const ticket = generation, term = query;
     const abort = new AbortController(); request = abort;
     const timeout = window.setTimeout(() => abort.abort(), 9000);
@@ -115,11 +134,12 @@ export function installSearchPicker(): boolean {
       if (ticket !== generation || term !== query || document.hidden) return;
       if (!response.ok) throw new Error(data.message || 'Search will be available again shortly.');
       if (!more) { list.replaceChildren(); items = []; selected = -1; list.scrollTop = 0; }
-      append(data.results || []); cursor = data.next || null;
-      showStatus(data.pending ? (items.length ? 'Loading more…' : 'Finding your music…') : data.message || (items.length ? 'Choose your version · Enter still submits your search' : 'No suggestions yet · Enter still submits your search'), Boolean(data.pending));
-      if (data.pending && cursor) pendingTimer = window.setTimeout(() => load(true), 1100);
+      append(data.results || []); cursor = items.length < maxResults ? data.next || null : null;
+      const pending = Boolean(data.pending && cursor);
+      showStatus(pending ? (items.length ? 'Loading more…' : 'Finding your music…') : data.message || (items.length ? '' : 'No matches found.'), pending);
+      if (pending) pendingTimer = window.setTimeout(() => load(true), 1100);
     } catch (error) {
-      if (ticket === generation && error.name !== 'AbortError') showStatus(error.message || 'Search unavailable · Enter still submits your search');
+      if (ticket === generation && error.name !== 'AbortError') showStatus(error.message || 'Search is temporarily unavailable.');
     } finally {
       window.clearTimeout(timeout);
       if (request === abort) { request = null; loading = false; }
@@ -156,6 +176,6 @@ export function installSearchPicker(): boolean {
   cardResize?.observe(card);
   window.addEventListener('resize', position); window.visualViewport?.addEventListener('resize', position);
   window.addEventListener('scroll', position, true);
-  window.addEventListener('pagehide', () => { cancel(); cardResize?.disconnect(); panel.remove(); });
+  window.addEventListener('pagehide', () => { cancel(); window.clearTimeout(closingTimer); card.classList.remove('has-search-picker'); inputGroup.classList.remove('has-search-surface'); cardResize?.disconnect(); panel.remove(); });
   return true;
 }
