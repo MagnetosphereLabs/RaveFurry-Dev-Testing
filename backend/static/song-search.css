@@ -1,17 +1,22 @@
-/* A separate glass compositor above the queue; never a row in its layout. */
-.furatic-search-picker{position:fixed;z-index:10020;height:0;display:flex;flex-direction:column;overflow:hidden;isolation:isolate;pointer-events:none;opacity:0;visibility:hidden;border:1px solid rgba(255,255,255,.24);border-top:0;border-radius:0 0 var(--furatic-panel-radius,24px) var(--furatic-panel-radius,24px);background:linear-gradient(140deg,rgba(17,28,45,.72),rgba(33,24,53,.62));backdrop-filter:blur(30px) saturate(135%);-webkit-backdrop-filter:blur(30px) saturate(135%);box-shadow:0 22px 42px #08111c44;color:var(--furatic-text,#f6f8fc);font:inherit;transition:height 380ms cubic-bezier(.22,1,.36,1),opacity 220ms ease,visibility 0s 380ms}
-.furatic-search-picker.is-open{pointer-events:auto;opacity:1;visibility:visible;transition-delay:0s}
-#music-input-card.has-search-picker{border-bottom-left-radius:0!important;border-bottom-right-radius:0!important}
-.song-search-scroll{min-height:0;overflow:auto;overscroll-behavior:contain;touch-action:pan-y;scrollbar-width:thin;padding:6px 10px;flex:1}
-.song-search-row{display:flex;align-items:center;gap:12px;width:100%;min-height:76px;padding:10px;border:1px solid transparent;border-radius:16px;color:inherit;background:transparent;text-align:left;font:inherit;cursor:pointer;transition:background 180ms ease,border-color 180ms ease,transform 180ms ease}
+/* One continuous glass surface behind the existing input and its overlay. */
+.furatic-search-picker{--search-input-height:66px;--search-row-height:76px;--search-radius:18px;box-sizing:border-box;position:fixed;z-index:10020;height:0;display:flex;flex-direction:column;padding:0 0 8px;overflow:hidden;pointer-events:none;opacity:0;visibility:hidden;border:1px solid var(--furatic-border,rgba(255,255,255,.12));border-radius:var(--search-radius);background:var(--furatic-panel,rgba(7,10,22,.30));backdrop-filter:blur(32px) saturate(120%);-webkit-backdrop-filter:blur(32px) saturate(120%);box-shadow:0 22px 42px #08111c44;color:var(--furatic-text,#f6f8fc);font:inherit;transition:height 520ms cubic-bezier(.22,1,.36,1),background 520ms ease,opacity 0s 520ms,visibility 0s 520ms}
+.furatic-search-picker::before{content:"";position:absolute;inset:1px;border-radius:inherit;pointer-events:none;background:radial-gradient(circle at top left,rgba(255,255,255,.045),transparent 28%),linear-gradient(180deg,rgba(255,255,255,.015),transparent)}
+.furatic-search-picker.is-open{opacity:1;visibility:visible;background:rgba(7,10,22,.80);transition-delay:0s}
+.has-search-surface{position:relative;z-index:10021!important}
+#music-input-card.has-search-picker{background:transparent!important;border-color:transparent!important;box-shadow:none!important;backdrop-filter:none!important;-webkit-backdrop-filter:none!important}
+#music-input-card.has-search-picker::before{opacity:0}
+.song-search-scroll{position:relative;box-sizing:border-box;min-height:0;overflow:auto;overscroll-behavior:contain;touch-action:pan-y;scrollbar-width:thin;padding:0 10px;margin-top:calc(var(--search-input-height) + 8px);flex:none;scroll-snap-type:y proximity;opacity:0;filter:blur(5px);transform:translateY(-10px) scale(.985);transform-origin:top center;transition:opacity 240ms ease,filter 360ms ease,transform 480ms cubic-bezier(.22,1,.36,1)}
+.is-open .song-search-scroll{pointer-events:auto;opacity:1;filter:none;transform:none;transition-delay:60ms}
+.song-search-row{box-sizing:border-box;display:flex;align-items:center;gap:12px;width:100%;height:var(--search-row-height);min-height:var(--search-row-height);padding:10px;border:1px solid transparent;border-radius:16px;color:inherit;background:transparent;text-align:left;font:inherit;cursor:pointer;scroll-snap-align:start;transition:background 180ms ease,border-color 180ms ease,transform 180ms ease}
 .song-search-row:hover,.song-search-row:focus-visible,.song-search-row[aria-selected=true]{outline:none;border-color:#ffffff32;background:#ffffff16}
 .song-search-row:active{transform:scale(.985)}
-.song-search-row img{width:52px;height:52px;border-radius:12px;object-fit:cover;flex:none;background:#ffffff0a}
+.song-search-row img{width:52px;height:52px;max-height:calc(var(--search-row-height) - 16px);border-radius:12px;object-fit:cover;flex:none;background:#ffffff0a}
 .song-search-copy{display:flex;flex-direction:column;min-width:0;gap:4px;flex:1}
 .song-search-title,.song-search-artist{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .song-search-title{font-size:1.05rem}.song-search-artist{font-size:.83rem;opacity:.72}
 .song-search-duration{font-size:.82rem;opacity:.75;flex:none;font-variant-numeric:tabular-nums}
-.song-search-status{display:flex;align-items:center;justify-content:center;gap:8px;min-height:38px;padding:6px 12px;font-size:.78rem;text-align:center;opacity:.8;flex:none}
+.song-search-status{position:relative;box-sizing:border-box;display:flex;align-items:center;justify-content:center;gap:8px;height:38px;padding:6px 12px;font-size:.78rem;text-align:center;opacity:.8;flex:none}
+.song-search-status[hidden]{display:none}
 .song-search-spinner{width:14px;height:14px;flex:none;border:2px solid #ffffff32;border-top-color:#c8edfa;border-radius:50%;animation:song-search-spin .8s linear infinite}
 @keyframes song-search-spin{to{transform:rotate(360deg)}}
-@media(prefers-reduced-motion:reduce){.furatic-search-picker,.song-search-row{transition:none}}
+@media(prefers-reduced-motion:reduce){.furatic-search-picker,.song-search-scroll,.song-search-row{transition:none}}
