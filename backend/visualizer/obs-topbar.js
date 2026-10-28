@@ -4,6 +4,9 @@
   const bar = document.getElementById('obs-topbar');
   if (!bar) return;
   const notice = document.getElementById('vote-notice');
+  const mascot = notice.querySelector('.vote-notice-character');
+  // Fill the PNG's transparent margins without changing its layout box/gaps.
+  if (mascot) { mascot.style.transform = 'scale(1.5)'; mascot.style.transformOrigin = 'center'; }
   const songRoot = document.getElementById('obs-song');
   const art = document.getElementById('obs-artwork');
   const progress = document.getElementById('obs-progress-fill');
@@ -11,6 +14,8 @@
   const noticeFields = Object.fromEntries(['headline','title','artist','detail','footer'].map(key => [key, document.getElementById('vote-notice-' + key)]));
   const ordinal = document.getElementById('vote-notice-ordinal');
   const texts = new Map(), effects = new Set(), marquees = new Map(), nodeEffects = new WeakMap();
+  const removals = new Map(), imageSources = new Map();
+  let pendingCover = null;
   const easing = 'cubic-bezier(.22,1,.36,1)';
   const segmenter = typeof Intl.Segmenter === 'function' ? new Intl.Segmenter(undefined, {granularity:'grapheme'}) : null;
   let snapshot = null, received = 0, songId = '', notificationId = '', coverId = '', coverGeneration = 0;
@@ -21,33 +26,78 @@
   const origin = 'http://127.0.0.1:' + port;
   const graphemes = text => segmenter ? Array.from(segmenter.segment(text), item => item.segment) : Array.from(text);
   const visible = () => !stopped && obsVisible && !document.hidden;
+  function disposeAnimation(animation) {
+    if (!animation) return;
+    animation.onfinish = animation.oncancel = null;
+    animation.cancel();
+    // cancel() alone can leave a detached target reachable from the timeline.
+    if (animation.effect) animation.effect.target = null;
+    animation.effect = null;
+  }
+  function removeNode(node) {
+    for (const target of [node, ...node.querySelectorAll('*')]) {
+      clearTimeout(removals.get(target)); removals.delete(target);
+      nodeEffects.get(target)?.cancel();
+      if (target.tagName === 'IMG') {
+        target.removeAttribute('src');
+        const url = imageSources.get(target);
+        if (url) { URL.revokeObjectURL(url); imageSources.delete(target); }
+      }
+    }
+    node.remove();
+  }
+  function removeLater(node, delay) {
+    clearTimeout(removals.get(node));
+    removals.set(node,setTimeout(() => removeNode(node),delay));
+  }
   function animate(node, frames, timing) {
     if (!node.animate) return null;
     nodeEffects.get(node)?.cancel();
-    const effect = node.animate(frames, {...timing, fill:'both'});
-    nodeEffects.set(node,effect);
-    effects.add(effect);
-    const release = () => { effects.delete(effect); if(nodeEffects.get(node)===effect)nodeEffects.delete(node); effect.onfinish = effect.oncancel = null; effect.cancel(); };
-    effect.onfinish = () => {
-      // Keep the terminal appearance before releasing the animation. In
-      // particular an outgoing digit must stay invisible until it is removed.
-      const last = frames[frames.length - 1];
-      for (const key of ['opacity', 'transform', 'filter']) if (last[key] !== undefined) node.style[key] = last[key];
-      release();
+    const animation = node.animate(frames, {...timing, fill:'both'});
+    let deadline = 0, released = false;
+    const record = {
+      cancel() {
+        if (released) return;
+        released = true; clearTimeout(deadline); effects.delete(record);
+        if (nodeEffects.get(node) === record) nodeEffects.delete(node);
+        disposeAnimation(animation);
+      },
+      finish() {
+        if (released) return;
+        const last = frames[frames.length - 1];
+        // Preserve the terminal opacity (including invisible outgoing digits),
+        // but release identity transforms/filters once the entrance settles.
+        for (const key of ['opacity','transform','filter']) {
+          if (last[key] !== undefined) node.style[key] = last.opacity !== 0 && key === 'transform' ? 'none' : last.opacity !== 0 && key === 'filter' ? 'none' : last[key];
+        }
+        record.cancel();
+      },
     };
-    effect.oncancel = release;
-    return effect;
+    nodeEffects.set(node,record); effects.add(record);
+    animation.onfinish = record.finish; animation.oncancel = record.cancel;
+    // Bound resource lifetime even if a renderer finish event never reaches
+    // this handler, including interruption while an element is detached.
+    deadline = setTimeout(record.finish,Number(timing.delay || 0)+Number(timing.duration || 0)+80);
+    return animation;
+  }
+  function restingGlyph(node) {
+    // Override the old HTML's permanent per-letter 3D promotion from this file.
+    // Entrance effects still composite while moving, then return to normal text.
+    node.style.transform = 'none'; node.style.backfaceVisibility = 'visible';
   }
   function marquee(element) {
     const state = texts.get(element);
     if (!state || state.digits || !state.content.isConnected) return;
     const width = element.clientWidth, distance = Math.max(0, state.content.scrollWidth - width);
     const prior = marquees.get(element);
-    if (prior && prior.width === width && prior.distance === distance && prior.content === state.content) return;
-    prior?.animation?.cancel();
+    const unchanged = prior && prior.width === width && prior.distance === distance && prior.content === state.content;
+    const canAnimate = visible() && getComputedStyle(element).visibility !== 'hidden';
+    if (unchanged && (prior.animation || distance <= 1 || !canAnimate)) return;
+    const resumeAt = unchanged ? prior.pausedAt : null;
+    disposeAnimation(prior?.animation);
     let animation = null;
     // Same resting, travelling and returning rhythm as the embedded queue.
-    if (width > 0 && distance > 1) {
+    if (canAnimate && width > 0 && distance > 1) {
       const rest = 2000, travel = Math.max(1000, distance / 30 * 1000), duration = 2 * (rest + travel);
       animation = state.content.animate([
         {transform:'translateX(0px)',offset:0},
@@ -56,8 +106,9 @@
         {transform:`translateX(${-distance}px)`,offset:(2*rest+travel)/duration,easing:'ease-in-out'},
         {transform:'translateX(0px)',offset:1},
       ], {duration, iterations:Infinity, delay:850});
+      if (Number.isFinite(resumeAt)) animation.currentTime = resumeAt;
     }
-    marquees.set(element, {width, distance, content:state.content, animation});
+    marquees.set(element, {width, distance, content:state.content, animation, pausedAt:resumeAt});
   }
   function typeText(element, value, digits = false) {
     const text = String(value ?? '');
@@ -69,63 +120,103 @@
         const cell = prior.content.children[index];
         if (cell.dataset.letter === letter) return;
         cell.dataset.letter = letter;
+        // A correction can arrive before the previous digit's exit completes.
+        // Prune that exit before selecting the actual current digit.
+        cell.querySelectorAll('.obs-glyph-out').forEach(removeNode);
         const old = cell.firstElementChild;
-        const next = document.createElement('span'); next.textContent = letter;
+        const next = document.createElement('span'); next.textContent = letter; restingGlyph(next);
         cell.appendChild(next);
         if (old) {
           old.classList.add('obs-glyph-out');
           animate(old, [{opacity:1,transform:'translateY(0) scale(1)'},{opacity:0,transform:'translateY(-.28em) scale(.45)'}],{duration:190,easing});
-          setTimeout(() => old.remove(), 210);
+          removeLater(old,210);
         }
         animate(next,[{opacity:0,transform:'translateY(.3em) scale(.5)'},{opacity:1,transform:'translateY(-.025em) scale(1.05)',offset:.78},{opacity:1,transform:'translate3d(0,0,0)'}],{duration:340,easing});
       });
       prior.text = text; return;
     }
-    marquees.get(element)?.animation?.cancel(); marquees.delete(element);
+    disposeAnimation(marquees.get(element)?.animation); marquees.delete(element);
     // Keep a single outgoing copy; quick changes cannot accumulate old labels.
-    element.querySelectorAll(':scope > .obs-outgoing-text').forEach(node => node.remove());
+    element.querySelectorAll(':scope > .obs-outgoing-text').forEach(removeNode);
     if (prior?.content.isConnected) {
       const old = prior.content; old.classList.add('obs-outgoing-text');
       animate(old,[{opacity:1,filter:'blur(0px)',transform:getComputedStyle(old).transform},{opacity:0,filter:'blur(5px)',transform:'translateY(-.18em) scale(.97)'}],{duration:280,easing});
-      setTimeout(() => old.remove(), 300);
+      removeLater(old,300);
     }
     const content = document.createElement('span'); content.className = 'obs-text-content'; content.setAttribute('aria-hidden','true');
+    const entering = [];
     graphemes(text).forEach((letter, index) => {
       const glyph = document.createElement('span'); glyph.className = digits ? 'obs-digit-cell' : 'obs-glyph';
       if (digits) { glyph.dataset.letter = letter; if (letter === ':') glyph.classList.add('is-colon'); const inner = document.createElement('span'); inner.textContent = letter; glyph.appendChild(inner); }
       else glyph.textContent = letter === ' ' ? '\u00a0' : letter;
-      content.appendChild(glyph);
-      animate(digits ? glyph.firstElementChild : glyph,[
+      const target = digits ? glyph.firstElementChild : glyph; restingGlyph(target);
+      content.appendChild(glyph); entering.push({glyph,target,index});
+    });
+    element.appendChild(content); texts.set(element,{text,content,digits});
+    // Offscreen letters have already settled before their marquee reaches
+    // them. Avoid allocating one animated GPU surface for every hidden letter.
+    const width = element.clientWidth, first = content.firstElementChild?.offsetLeft || 0;
+    if (getComputedStyle(element).visibility !== 'hidden') for (const {glyph,target,index} of entering) {
+      if (!digits && (width > 0 ? glyph.offsetLeft - first > width + glyph.offsetWidth : index >= 64)) continue;
+      animate(target,[
         {opacity:0,transform:'translate(.12em,.38em) rotate(-5deg) scale(.45)',filter:'blur(3px)'},
         {opacity:1,transform:'translate(0,-.025em) rotate(1deg) scale(1.045)',filter:'blur(0px)',offset:.78},
         {opacity:1,transform:'translate3d(0,0,0)',filter:'none'},
       ], {duration:450,delay:Math.min(index * (digits ? 25 : 16),560),easing});
-    });
-    element.appendChild(content); texts.set(element,{text,content,digits});
+    }
     setTimeout(() => marquee(element), 30);
   }
+  function cancelCoverLoad() {
+    const load = pendingCover;
+    if (!load) return;
+    pendingCover = null; ++coverGeneration;
+    clearTimeout(load.timeout); load.abort.abort(); load.rejectDecode?.(new DOMException('Cover replaced','AbortError'));
+    if (load.image) removeNode(load.image);
+  }
   async function artwork(path) {
-    if (path === coverId) return;
+    if (path === coverId) { cancelCoverLoad(); return; }
+    if (pendingCover?.path === path) return;
+    cancelCoverLoad();
     const ticket = ++coverGeneration;
+    // Dispose an older transition before choosing the actual current cover.
+    art.querySelectorAll('.is-outgoing').forEach(removeNode);
     if (!path) {
       coverId = ''; art.classList.add('is-empty');
       art.querySelectorAll('img').forEach(node => {
+        node.classList.add('is-outgoing');
         animate(node,[{opacity:1,transform:'scale(1)',filter:'blur(0px)'},{opacity:0,transform:'scale(.8) rotate(-3deg)',filter:'blur(8px)'}],{duration:450,easing});
-        setTimeout(() => node.remove(),470);
+        removeLater(node,470);
       });
       return;
     }
     if (!/^\/overlay-artwork\/[A-Za-z0-9_-]{11}$/.test(path)) return;
-    const image = new Image(); image.alt = ''; image.decoding = 'async';
-    image.src = origin + path;
-    try { await image.decode(); } catch (_) { return; }
-    if (ticket !== coverGeneration || !visible()) return;
-    coverId = path; art.classList.remove('is-empty');
-    const previous = art.querySelector('img');
-    art.querySelectorAll('.is-outgoing').forEach(node => node.remove());
-    if (previous) { previous.classList.add('is-outgoing'); animate(previous,[{opacity:1,transform:'scale(1)',filter:'blur(0px)'},{opacity:0,transform:'scale(.87) rotate(-4deg)',filter:'blur(8px)'}],{duration:500,easing}); setTimeout(() => previous.remove(),520); }
-    art.appendChild(image);
-    animate(image,[{opacity:0,transform:'translateY(8%) scale(.88) rotate(3deg)',filter:'blur(8px)'},{opacity:1,transform:'translateY(0) scale(1.025) rotate(-.5deg)',filter:'blur(0px)',offset:.8},{opacity:1,transform:'translateY(0) scale(1) rotate(0)',filter:'blur(0px)'}],{duration:650,easing});
+    const load = {path,abort:new AbortController(),image:null,rejectDecode:null,timeout:0};
+    pendingCover = load;
+    load.timeout = setTimeout(() => { if (pendingCover === load) cancelCoverLoad(); },5000);
+    try {
+      const response = await fetch(origin + path,{cache:'no-store',credentials:'omit',signal:load.abort.signal});
+      if (!response.ok) return;
+      const blob = await response.blob();
+      if (ticket !== coverGeneration || pendingCover !== load || !visible() || !blob.size || blob.size > 2*1024*1024) return;
+      // Blob URLs have explicit lifetimes: only the current/incoming cover and
+      // the one finishing its transition may retain decoded image resources.
+      const image = new Image(); image.alt = ''; image.decoding = 'async'; load.image = image;
+      const url = URL.createObjectURL(blob); imageSources.set(image,url); image.src = url;
+      await Promise.race([image.decode(),new Promise((_,reject) => { load.rejectDecode = reject; })]);
+      load.rejectDecode = null;
+      if (ticket !== coverGeneration || pendingCover !== load || !visible()) return;
+      coverId = path; art.classList.remove('is-empty');
+      art.querySelectorAll('.is-outgoing').forEach(removeNode);
+      const previous = art.querySelector('img');
+      if (previous) { previous.classList.add('is-outgoing'); animate(previous,[{opacity:1,transform:'scale(1)',filter:'blur(0px)'},{opacity:0,transform:'scale(.87) rotate(-4deg)',filter:'blur(8px)'}],{duration:500,easing}); removeLater(previous,520); }
+      art.appendChild(image); load.image = null;
+      animate(image,[{opacity:0,transform:'translateY(8%) scale(.88) rotate(3deg)',filter:'blur(8px)'},{opacity:1,transform:'translateY(0) scale(1.025) rotate(-.5deg)',filter:'blur(0px)',offset:.8},{opacity:1,transform:'translateY(0) scale(1) rotate(0)',filter:'blur(0px)'}],{duration:650,easing});
+    } catch (_) { /* Keep the current cover and retry on the next snapshot. */ }
+    finally {
+      clearTimeout(load.timeout); load.abort.abort(); load.rejectDecode = null;
+      if (load.image) removeNode(load.image);
+      if (pendingCover === load) pendingCover = null;
+    }
   }
   function reminder(mode) {
     return {id:'default',kind:'reminder',headline:"Don't forget to vote!",title:'',artist:'',detail:'Help your favorite music reach the top.',footer:'Cast your vote and add music at',persistent:true};
@@ -241,15 +332,35 @@
   window.addEventListener('resize',matchOriginalNoticeHeight);
   const resize = new ResizeObserver(() => { fitNotification(); for (const element of texts.keys()) marquee(element); });
   for (const element of [...Object.values(fields),...Object.values(noticeFields)]) resize.observe(element);
-  document.fonts?.ready.then(() => { fitNotification(); for (const element of texts.keys()) marquee(element); });
+  document.fonts?.ready.then(() => { if(stopped)return; fitNotification(); for (const element of texts.keys()) marquee(element); });
   function visibility() {
     clearTimeout(timer); clearInterval(clock); timer = clock = 0;
-    if (!visible()) { controller?.abort(); for (const state of marquees.values()) state.animation?.pause(); return; }
-    for (const state of marquees.values()) state.animation?.play();
+    if (!visible()) {
+      controller?.abort(); cancelCoverLoad();
+      for (const effect of [...effects]) effect.finish();
+      for (const node of [...removals.keys()]) removeNode(node);
+      for (const state of marquees.values()) {
+        if (state.animation) state.pausedAt = Number(state.animation.currentTime) || 0;
+        disposeAnimation(state.animation); state.animation = null;
+      }
+      return;
+    }
+    for (const element of texts.keys()) marquee(element);
     clock = setInterval(tick,100); poll();
   }
-  window.addEventListener('obsSourceVisibleChanged', event => { if (typeof event.detail?.visible === 'boolean') obsVisible = event.detail.visible; visibility(); });
+  const sourceVisibility = event => { if (typeof event.detail?.visible === 'boolean') obsVisible = event.detail.visible; visibility(); };
+  window.addEventListener('obsSourceVisibleChanged', sourceVisibility);
   document.addEventListener('visibilitychange', visibility);
-  window.addEventListener('pagehide', () => { stopped = true; visibility(); resize.disconnect(); effects.forEach(effect => effect.cancel()); marquees.forEach(state => state.animation?.cancel()); });
+  window.addEventListener('pagehide', () => {
+    stopped = true; visibility(); resize.disconnect();
+    window.removeEventListener('resize',matchOriginalNoticeHeight);
+    window.removeEventListener('obsSourceVisibleChanged',sourceVisibility);
+    document.removeEventListener('visibilitychange',visibility);
+    for (const effect of [...effects]) effect.cancel();
+    for (const state of marquees.values()) disposeAnimation(state.animation);
+    for (const image of [...imageSources.keys()]) removeNode(image);
+    if (mascot) removeNode(mascot);
+    effects.clear(); marquees.clear(); texts.clear(); snapshot = null;
+  });
   visibility();
 })();
