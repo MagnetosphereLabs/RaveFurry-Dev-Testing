@@ -8,6 +8,8 @@ import ctypes
 import logging
 import json
 import math
+import hmac
+import re
 from logging.handlers import RotatingFileHandler
 import os
 from pathlib import Path
@@ -23,8 +25,8 @@ from .capture import Capture
 
 MAX_CLIENTS = 4
 PAGE = Path(__file__).with_name("obs-background.html")
-NOTIFICATION_SCRIPT = Path(__file__).with_name("obs-notifications.js")
-NOTIFICATION_FILE = PAGE.parent.parent / "config" / "obs_vote_notification.json"
+NOTIFICATION_SCRIPT = Path(__file__).with_name("obs-topbar.js")
+
 LOG = logging.getLogger("furatic.visualizer")
 
 
@@ -68,6 +70,9 @@ class ParentGuard:
 
 def create_app(capture, port):
     clients = set()
+    overlay = {"version": 1, "updatedAt": 0, "mode": "event", "song": None, "queueEmpty": False, "message": None}
+    cover_id, cover_bytes, cover_type = '', b'', 'image/jpeg'
+    publish_token = os.environ.get('FURATIC_OBS_PUBLISH_TOKEN', '')
     publishers = set()
     scene = None
     scene_at = 0.0
@@ -98,30 +103,86 @@ def create_app(capture, port):
     async def notification_script(request):
         return web.Response(body=NOTIFICATION_SCRIPT.read_bytes(), content_type="application/javascript")
 
-    def read_notification():
-        # Local, size-bounded, read-only metadata; never Django or audio buffers.
-        try:
-            with NOTIFICATION_FILE.open("rb") as source:
-                raw = source.read(8193)
-            if len(raw) > 8192:
-                raise ValueError("Oversized notification")
-            value = json.loads(raw)
-            now = time.time()
-            if value.get("version") != 1 or not 0 <= now - value["updatedAt"] < 10:
-                raise ValueError("Stale notification")
-            message = value.get("message")
-            if message:
-                persistent = message.get("persistent") is True and message.get("kind") in ("rank", "reminder")
-                if message["createdAt"] > now or (not persistent and now >= message["expiresAt"]):
-                    value["message"] = None
-            return value
-        except (OSError, ValueError, KeyError, TypeError, AttributeError):
-            return {"version": 1, "message": None}
+    def authorize(request):
+        if not publish_token or not hmac.compare_digest(request.headers.get('Authorization', ''), 'Bearer ' + publish_token):
+            raise web.HTTPForbidden(text='Private publisher only')
 
-    async def notification(request):
-        # Disk access is off the audio/scene event loop. This endpoint is polled
-        # once every two seconds only by the OBS page, never by the website.
-        return web.json_response(await asyncio.to_thread(read_notification))
+    async def overlay_state(request):
+        return web.json_response(overlay)
+
+    async def publish_overlay(request):
+        nonlocal overlay
+        authorize(request)
+        if request.content_length is None or request.content_length > 32768:
+            raise web.HTTPRequestEntityTooLarge(max_size=32768, actual_size=request.content_length or 0)
+        try:
+            value = await request.json()
+            if not isinstance(value, dict) or value.get('version') != 1 or value.get('mode') not in {'event', 'closing', 'afterhours'}:
+                raise ValueError()
+            at = value.get('updatedAt')
+            if type(at) not in (int, float) or not math.isfinite(at) or abs(time.time() - at) > 30:
+                raise ValueError()
+            if type(value.get('queueEmpty')) is not bool:
+                raise ValueError()
+            song = value.get('song')
+            if song is not None:
+                if not isinstance(song, dict) or type(song.get('paused')) is not bool:
+                    raise ValueError()
+                for key, maximum in [('id', 64), ('title', 1000), ('artist', 1000), ('artwork', 64)]:
+                    if not isinstance(song.get(key), str) or len(song[key]) > maximum:
+                        raise ValueError()
+                if song['artwork'] and not re.fullmatch(r'/overlay-artwork/[A-Za-z0-9_-]{11}', song['artwork']):
+                    raise ValueError()
+                for key in ('position', 'duration', 'votes'):
+                    number = song.get(key)
+                    if type(number) not in (int, float) or not math.isfinite(number) or abs(number) > 10000000:
+                        raise ValueError()
+                if song['position'] < 0 or song['duration'] < 0:
+                    raise ValueError()
+                song = {key: song[key] for key in ('id', 'title', 'artist', 'artwork', 'paused', 'position', 'duration', 'votes')}
+            message = value.get('message')
+            if message is not None:
+                if not isinstance(message, dict) or message.get('kind') not in {'rank', 'risk', 'reminder'} or not isinstance(message.get('id'), str) or len(message['id']) > 64:
+                    raise ValueError()
+                for key in ('headline', 'title', 'artist', 'detail', 'footer'):
+                    if not isinstance(message.get(key), str) or len(message[key]) > (1000 if key in {'title', 'artist'} else 240):
+                        raise ValueError()
+                for key in ('createdAt', 'expiresAt'):
+                    if type(message.get(key)) not in (int, float) or not math.isfinite(message[key]):
+                        raise ValueError()
+                if message.get('kind') == 'rank' and message.get('rank') not in (1, 2, 3):
+                    raise ValueError()
+            if value['updatedAt'] >= overlay['updatedAt']:
+                overlay = {'version': 1, 'updatedAt': at, 'mode': value['mode'], 'song': song,
+                           'queueEmpty': value['queueEmpty'], 'message': message}
+        except (ValueError, TypeError, KeyError):
+            raise web.HTTPBadRequest(text='Invalid overlay snapshot') from None
+        return web.json_response({'ok': True, 'artworkId': cover_id})
+
+    async def publish_artwork(request):
+        nonlocal cover_id, cover_bytes, cover_type
+        authorize(request)
+        video = request.match_info['video']
+        if not re.fullmatch(r'[A-Za-z0-9_-]{11}', video):
+            raise web.HTTPBadRequest()
+        data = await request.read()
+        if not data or len(data) > 2 * 1024 * 1024:
+            raise web.HTTPBadRequest()
+        if data.startswith(b'\xff\xd8\xff'):
+            mime = 'image/jpeg'
+        elif data.startswith(b'\x89PNG\r\n\x1a\n'):
+            mime = 'image/png'
+        elif data.startswith(b'RIFF') and data[8:12] == b'WEBP':
+            mime = 'image/webp'
+        else:
+            raise web.HTTPBadRequest()
+        cover_id, cover_bytes, cover_type = video, data, mime
+        return web.json_response({'ok': True})
+
+    async def artwork(request):
+        if request.match_info['video'] != cover_id or not cover_bytes:
+            raise web.HTTPNotFound()
+        return web.Response(body=cover_bytes, content_type=cover_type)
 
     async def health(request):
         alive = capture.healthy()
@@ -205,11 +266,14 @@ def create_app(capture, port):
             with contextlib.suppress(asyncio.TimeoutError, ConnectionError):
                 await asyncio.wait_for(ws.close(code=1001, message=b"Visualizer stopping"), timeout=.50)
 
-    app = web.Application(middlewares=[only_local], client_max_size=1024)
+    app = web.Application(middlewares=[only_local], client_max_size=2 * 1024 * 1024 + 1)
     app.router.add_get("/", page)
     app.router.add_get("/obs-background.html", page)
-    app.router.add_get("/obs-notifications.js", notification_script)
-    app.router.add_get("/vote-notification.json", notification)
+    app.router.add_get("/obs-topbar.js", notification_script)
+    app.router.add_get("/overlay-state", overlay_state)
+    app.router.add_post("/overlay-state", publish_overlay)
+    app.router.add_get("/overlay-artwork/{video}", artwork)
+    app.router.add_post("/overlay-artwork/{video}", publish_artwork)
     app.router.add_get("/_healthz/", health)
     app.router.add_get("/features", socket)
     app.router.add_get("/features.json", features)

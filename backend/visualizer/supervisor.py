@@ -5,6 +5,7 @@ import importlib.util
 import contextlib
 import os
 import signal
+import secrets
 import subprocess
 import sys
 import threading
@@ -14,6 +15,8 @@ import urllib.request
 
 class VisualizerCompanion:
     def __init__(self, directory):
+        # Both the companion and web child inherit this process-private key.
+        os.environ.setdefault("FURATIC_OBS_PUBLISH_TOKEN", secrets.token_urlsafe(32))
         self.directory = str(directory)
         self.stopping = threading.Event()
         self.child = None
