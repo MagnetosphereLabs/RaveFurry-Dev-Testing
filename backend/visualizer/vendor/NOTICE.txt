@@ -1,0 +1,4 @@
+mpegts.js v1.8.2, https://github.com/xqq/mpegts.js
+Original dist/mpegts.min.js SHA-256: ceb67d511fae54f442a5b9c03e6b8ea30a89efc9bde7fa3ce0687f05f31e6d6a
+License: Apache-2.0; see mpegts-LICENSE.
+Local resource-lifecycle patch: retain the two worker message-handler references as _furaticWorkerHandler so the owning player can detach handlers, terminate workers, and revoke worker blob URLs immediately during teardown. No decoder, muxer, or playback algorithms changed.
