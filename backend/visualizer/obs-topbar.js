@@ -14,8 +14,9 @@
   const noticeFields = Object.fromEntries(['headline','title','artist','detail','footer'].map(key => [key, document.getElementById('vote-notice-' + key)]));
   const ordinal = document.getElementById('vote-notice-ordinal');
   const texts = new Map(), effects = new Set(), marquees = new Map(), nodeEffects = new WeakMap();
-  const removals = new Map(), imageSources = new Map();
-  let pendingCover = null;
+  const removals = new Map(), layouts = new Map(), textSlots = new Map(), animationSlots = new WeakMap();
+  const coverSurfaces = [];
+  let pendingCover = null, decodingCover = null;
   const easing = 'cubic-bezier(.22,1,.36,1)';
   const segmenter = typeof Intl.Segmenter === 'function' ? new Intl.Segmenter(undefined, {granularity:'grapheme'}) : null;
   let snapshot = null, received = 0, songId = '', notificationId = '', coverId = '', coverGeneration = 0;
@@ -31,18 +32,38 @@
     animation.onfinish = animation.oncancel = null;
     animation.cancel();
     // cancel() alone can leave a detached target reachable from the timeline.
-    if (animation.effect) animation.effect.target = null;
+    if (animation.effect) {
+      animation.effect.target = null;
+      animation.effect.setKeyframes?.([]);
+    }
     animation.effect = null;
+  }
+  function startAnimation(node, frames, timing) {
+    // Reuse the native animation/effect for this stable target. Cancellation
+    // still detaches the target and empties its keyframes between transitions.
+    const slot = animationSlots.get(node);
+    if (slot) {
+      slot.effect.target = node;
+      slot.effect.setKeyframes(frames);
+      slot.effect.updateTiming({delay:0,endDelay:0,iterations:1,iterationStart:0,direction:'normal',easing:'linear',fill:'none',...timing});
+      slot.animation.effect = slot.effect;
+      slot.animation.currentTime = 0;
+      slot.animation.play();
+      return slot.animation;
+    }
+    const animation = node.animate(frames,timing);
+    if (animation.effect?.setKeyframes && animation.effect?.updateTiming) animationSlots.set(node,{animation,effect:animation.effect});
+    return animation;
   }
   function removeNode(node) {
     for (const target of [node, ...node.querySelectorAll('*')]) {
       clearTimeout(removals.get(target)); removals.delete(target);
       nodeEffects.get(target)?.cancel();
-      if (target.tagName === 'IMG') {
-        target.removeAttribute('src');
-        const url = imageSources.get(target);
-        if (url) { URL.revokeObjectURL(url); imageSources.delete(target); }
-      }
+      // Retired pool entries must not keep a blur/transform layer description
+      // while waiting for reuse. Removal happens in this same JS turn.
+      if (target.style) { target.style.transform = target.style.filter = 'none'; target.style.opacity = '1'; }
+      if (target.tagName === 'IMG') target.removeAttribute('src');
+      if (target.tagName === 'CANVAS') target.width = target.height = 0;
     }
     node.remove();
   }
@@ -53,7 +74,7 @@
   function animate(node, frames, timing) {
     if (!node.animate) return null;
     nodeEffects.get(node)?.cancel();
-    const animation = node.animate(frames, {...timing, fill:'both'});
+    const animation = startAnimation(node, frames, {...timing, fill:'both'});
     let deadline = 0, released = false;
     const record = {
       cancel() {
@@ -74,7 +95,9 @@
       },
     };
     nodeEffects.set(node,record); effects.add(record);
-    animation.onfinish = record.finish; animation.oncancel = record.cancel;
+    // A queued event from a canceled use must not finish/cancel its next use.
+    animation.onfinish = () => { if (!animation.playState || animation.playState === 'finished') record.finish(); };
+    animation.oncancel = () => { if (!animation.playState || animation.playState === 'idle') record.cancel(); };
     // Bound resource lifetime even if a renderer finish event never reaches
     // this handler, including interruption while an element is detached.
     deadline = setTimeout(record.finish,Number(timing.delay || 0)+Number(timing.duration || 0)+80);
@@ -84,6 +107,29 @@
     // Override the old HTML's permanent per-letter 3D promotion from this file.
     // Entrance effects still composite while moving, then return to normal text.
     node.style.transform = 'none'; node.style.backfaceVisibility = 'visible';
+  }
+  function textContent(element) {
+    // Two stable label surfaces per field: current and outgoing. Recycle their
+    // glyphs too, so each song/notice does not introduce new compositor targets.
+    let slots = textSlots.get(element);
+    if (!slots) { slots = []; textSlots.set(element,slots); }
+    let content = slots.find(node => !node.isConnected);
+    if (!content) { content = document.createElement('span'); slots.push(content); }
+    content.className = 'obs-text-content'; content.setAttribute('aria-hidden','true');
+    content.style.opacity = '1'; content.style.transform = content.style.filter = 'none';
+    return content;
+  }
+  function digitGlyph(cell, letter) {
+    // Keep two reusable digit faces, even during rapid clock corrections.
+    cell.querySelectorAll('.obs-glyph-out').forEach(removeNode);
+    const old = cell.firstElementChild;
+    const faces = cell._obsFaces || (cell._obsFaces = old ? [old] : []);
+    let next = faces.find(node => node !== old);
+    if (!next) { next = document.createElement('span'); faces.push(next); }
+    next.className = ''; next.textContent = letter;
+    next.style.opacity = '1'; next.style.filter = 'none'; restingGlyph(next);
+    cell.appendChild(next);
+    return {old,next};
   }
   function marquee(element) {
     const state = texts.get(element);
@@ -99,7 +145,7 @@
     // Same resting, travelling and returning rhythm as the embedded queue.
     if (canAnimate && width > 0 && distance > 1) {
       const rest = 2000, travel = Math.max(1000, distance / 30 * 1000), duration = 2 * (rest + travel);
-      animation = state.content.animate([
+      animation = startAnimation(state.content,[
         {transform:'translateX(0px)',offset:0},
         {transform:'translateX(0px)',offset:rest/duration,easing:'ease-in-out'},
         {transform:`translateX(${-distance}px)`,offset:(rest+travel)/duration},
@@ -122,10 +168,7 @@
         cell.dataset.letter = letter;
         // A correction can arrive before the previous digit's exit completes.
         // Prune that exit before selecting the actual current digit.
-        cell.querySelectorAll('.obs-glyph-out').forEach(removeNode);
-        const old = cell.firstElementChild;
-        const next = document.createElement('span'); next.textContent = letter; restingGlyph(next);
-        cell.appendChild(next);
+        const {old,next} = digitGlyph(cell,letter);
         if (old) {
           old.classList.add('obs-glyph-out');
           animate(old, [{opacity:1,transform:'translateY(0) scale(1)'},{opacity:0,transform:'translateY(-.28em) scale(.45)'}],{duration:190,easing});
@@ -143,15 +186,24 @@
       animate(old,[{opacity:1,filter:'blur(0px)',transform:getComputedStyle(old).transform},{opacity:0,filter:'blur(5px)',transform:'translateY(-.18em) scale(.97)'}],{duration:280,easing});
       removeLater(old,300);
     }
-    const content = document.createElement('span'); content.className = 'obs-text-content'; content.setAttribute('aria-hidden','true');
-    const entering = [];
+    const content = textContent(element);
+    const entering = [], reusable = [...content.children];
     graphemes(text).forEach((letter, index) => {
-      const glyph = document.createElement('span'); glyph.className = digits ? 'obs-digit-cell' : 'obs-glyph';
-      if (digits) { glyph.dataset.letter = letter; if (letter === ':') glyph.classList.add('is-colon'); const inner = document.createElement('span'); inner.textContent = letter; glyph.appendChild(inner); }
+      const glyph = reusable[index] || document.createElement('span');
+      glyph.className = digits ? 'obs-digit-cell' : 'obs-glyph'; glyph.style.display = '';
+      if (digits) {
+        glyph.dataset.letter = letter; if (letter === ':') glyph.classList.add('is-colon');
+        // A retired label can have two digit faces left after interruption.
+        for (const face of [...glyph.children]) removeNode(face);
+        digitGlyph(glyph,letter);
+      }
       else glyph.textContent = letter === ' ' ? '\u00a0' : letter;
-      const target = digits ? glyph.firstElementChild : glyph; restingGlyph(target);
+      const target = digits ? glyph.firstElementChild : glyph;
+      target.style.opacity = '1'; target.style.filter = 'none'; restingGlyph(target);
       content.appendChild(glyph); entering.push({glyph,target,index});
     });
+    const active = new Set(entering.map(item => item.glyph));
+    for (const glyph of reusable) if (!active.has(glyph)) { glyph.style.display = 'none'; glyph.textContent = ''; content.appendChild(glyph); }
     element.appendChild(content); texts.set(element,{text,content,digits});
     // Offscreen letters have already settled before their marquee reaches
     // them. Avoid allocating one animated GPU surface for every hidden letter.
@@ -164,58 +216,88 @@
         {opacity:1,transform:'translate3d(0,0,0)',filter:'none'},
       ], {duration:450,delay:Math.min(index * (digits ? 25 : 16),560),easing});
     }
-    setTimeout(() => marquee(element), 30);
+    clearTimeout(layouts.get(element));
+    layouts.set(element,setTimeout(() => { layouts.delete(element); if (!stopped) marquee(element); },30));
   }
   function cancelCoverLoad() {
     const load = pendingCover;
     if (!load) return;
     pendingCover = null; ++coverGeneration;
-    clearTimeout(load.timeout); load.abort.abort(); load.rejectDecode?.(new DOMException('Cover replaced','AbortError'));
-    if (load.image) removeNode(load.image);
+    clearTimeout(load.timeout); load.abort.abort();
+    // Native bitmap decoding cannot be aborted. Its owner stays alive only
+    // until that ONE decode returns, then closes it even after hide/unload.
+  }
+  function coverSurface(bitmap) {
+    let canvas = coverSurfaces.find(node => !node.isConnected);
+    if (!canvas) {
+      if (coverSurfaces.length === 2) throw new Error('Both cover surfaces are busy');
+      canvas = document.createElement('canvas'); canvas.className = 'obs-cover';
+      canvas.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;border-radius:inherit';
+      coverSurfaces.push(canvas);
+    }
+    const unit = Math.min(innerWidth*.017,innerHeight*.03022226);
+    const pixels = Math.min(1024,Math.max(64,Math.ceil((parseFloat(bar.style.getPropertyValue('--obs-cover-size')) || unit*6.7)*(window.devicePixelRatio || 1)*1.1)));
+    const context = canvas.getContext('2d',{willReadFrequently:true});
+    if (!context) throw new Error('Artwork canvas unavailable');
+    // Draw once per cover into a display-sized backing store, with no frame
+    // queue and no full-size HTML image retained for the current song.
+    canvas.width = canvas.height = pixels;
+    context.imageSmoothingEnabled = true; context.imageSmoothingQuality = 'high';
+    const side = Math.min(bitmap.width,bitmap.height);
+    context.drawImage(bitmap,(bitmap.width-side)/2,(bitmap.height-side)/2,side,side,0,0,pixels,pixels);
+    // Flush the draw before close(), rather than leaving source-image work
+    // deferred. The small reusable canvas owns the displayed pixels.
+    context.getImageData(0,0,1,1);
+    canvas.style.opacity = '1'; canvas.style.transform = canvas.style.filter = 'none';
+    canvas.classList.remove('is-outgoing');
+    return canvas;
   }
   async function artwork(path) {
     if (path === coverId) { cancelCoverLoad(); return; }
     if (pendingCover?.path === path) return;
     cancelCoverLoad();
     const ticket = ++coverGeneration;
-    // Dispose an older transition before choosing the actual current cover.
     art.querySelectorAll('.is-outgoing').forEach(removeNode);
     if (!path) {
       coverId = ''; art.classList.add('is-empty');
-      art.querySelectorAll('img').forEach(node => {
+      art.querySelectorAll('.obs-cover').forEach(node => {
         node.classList.add('is-outgoing');
         animate(node,[{opacity:1,transform:'scale(1)',filter:'blur(0px)'},{opacity:0,transform:'scale(.8) rotate(-3deg)',filter:'blur(8px)'}],{duration:450,easing});
         removeLater(node,470);
       });
       return;
     }
-    if (!/^\/overlay-artwork\/[A-Za-z0-9_-]{11}$/.test(path)) return;
-    const load = {path,abort:new AbortController(),image:null,rejectDecode:null,timeout:0};
+    if (!/^\/overlay-artwork\/[A-Za-z0-9_-]{11}$/.test(path) || decodingCover) return;
+    const load = {path,abort:new AbortController(),timeout:0};
     pendingCover = load;
     load.timeout = setTimeout(() => { if (pendingCover === load) cancelCoverLoad(); },5000);
+    let bitmap = null;
     try {
       const response = await fetch(origin + path,{cache:'no-store',credentials:'omit',signal:load.abort.signal});
       if (!response.ok) return;
       const blob = await response.blob();
       if (ticket !== coverGeneration || pendingCover !== load || !visible() || !blob.size || blob.size > 2*1024*1024) return;
-      // Blob URLs have explicit lifetimes: only the current/incoming cover and
-      // the one finishing its transition may retain decoded image resources.
-      const image = new Image(); image.alt = ''; image.decoding = 'async'; load.image = image;
-      const url = URL.createObjectURL(blob); imageSources.set(image,url); image.src = url;
-      await Promise.race([image.decode(),new Promise((_,reject) => { load.rejectDecode = reject; })]);
-      load.rejectDecode = null;
+      decodingCover = load;
+      bitmap = await createImageBitmap(blob);
       if (ticket !== coverGeneration || pendingCover !== load || !visible()) return;
-      coverId = path; art.classList.remove('is-empty');
       art.querySelectorAll('.is-outgoing').forEach(removeNode);
-      const previous = art.querySelector('img');
+      const canvas = coverSurface(bitmap);
+      bitmap.close(); bitmap = null;
+      const previous = art.querySelector('.obs-cover');
       if (previous) { previous.classList.add('is-outgoing'); animate(previous,[{opacity:1,transform:'scale(1)',filter:'blur(0px)'},{opacity:0,transform:'scale(.87) rotate(-4deg)',filter:'blur(8px)'}],{duration:500,easing}); removeLater(previous,520); }
-      art.appendChild(image); load.image = null;
-      animate(image,[{opacity:0,transform:'translateY(8%) scale(.88) rotate(3deg)',filter:'blur(8px)'},{opacity:1,transform:'translateY(0) scale(1.025) rotate(-.5deg)',filter:'blur(0px)',offset:.8},{opacity:1,transform:'translateY(0) scale(1) rotate(0)',filter:'blur(0px)'}],{duration:650,easing});
+      art.appendChild(canvas); coverId = path; art.classList.remove('is-empty');
+      animate(canvas,[{opacity:0,transform:'translateY(8%) scale(.88) rotate(3deg)',filter:'blur(8px)'},{opacity:1,transform:'translateY(0) scale(1.025) rotate(-.5deg)',filter:'blur(0px)',offset:.8},{opacity:1,transform:'translateY(0) scale(1) rotate(0)',filter:'blur(0px)'}],{duration:650,easing});
     } catch (_) { /* Keep the current cover and retry on the next snapshot. */ }
     finally {
-      clearTimeout(load.timeout); load.abort.abort(); load.rejectDecode = null;
-      if (load.image) removeNode(load.image);
+      bitmap?.close();
+      for (const surface of coverSurfaces) if (!surface.isConnected) removeNode(surface);
+      clearTimeout(load.timeout);
+      if (decodingCover === load) decodingCover = null;
       if (pendingCover === load) pendingCover = null;
+      const canceled = load.abort.signal.aborted; load.abort.abort();
+      // Coalesce changes during a slow decode to the latest song, never queue
+      // several uncancelable decodes. A failed current cover retries next poll.
+      if (visible() && snapshot && (canceled || snapshot.song?.artwork !== path)) artwork(snapshot.song?.artwork || '');
     }
   }
   function reminder(mode) {
@@ -336,6 +418,8 @@
   function visibility() {
     clearTimeout(timer); clearInterval(clock); timer = clock = 0;
     if (!visible()) {
+      for (const timeout of layouts.values()) clearTimeout(timeout);
+      layouts.clear();
       controller?.abort(); cancelCoverLoad();
       for (const effect of [...effects]) effect.finish();
       for (const node of [...removals.keys()]) removeNode(node);
@@ -358,7 +442,9 @@
     document.removeEventListener('visibilitychange',visibility);
     for (const effect of [...effects]) effect.cancel();
     for (const state of marquees.values()) disposeAnimation(state.animation);
-    for (const image of [...imageSources.keys()]) removeNode(image);
+    for (const canvas of coverSurfaces) removeNode(canvas);
+    for (const slots of textSlots.values()) for (const content of slots) removeNode(content);
+    coverSurfaces.length = 0; textSlots.clear();
     if (mascot) removeNode(mascot);
     effects.clear(); marquees.clear(); texts.clear(); snapshot = null;
   });
