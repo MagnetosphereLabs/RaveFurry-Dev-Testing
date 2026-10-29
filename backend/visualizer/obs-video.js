@@ -18,7 +18,7 @@
   const active=()=>!stopped&&visible()&&state?.layout==='video'&&state.enabled&&!state.suspended&&!window.FuraticOBSPresentation?.active;
   function animate(node,frames,duration=550){
     if(!node?.animate)return;
-    for(const a of [...effects])if(a.effect?.target===node){a.onfinish=a.oncancel=null;a.cancel();a.effect=null;effects.delete(a);}
+    for(const a of [...effects])if(a.effect?.target===node){clearTimeout(a._deadline);a.onfinish=a.oncancel=null;a.cancel();a.effect=null;effects.delete(a);}
     const a=node.animate(frames,{duration,easing:ease,fill:'none'});effects.add(a);
     const release=()=>{clearTimeout(a._deadline);a.onfinish=a.oncancel=null;a.cancel();if(a.effect)a.effect.target=null;a.effect=null;effects.delete(a);};
     a.onfinish=a.oncancel=release;a._deadline=setTimeout(release,duration+100);
@@ -133,7 +133,7 @@
     if(window.FuraticOBSCreateVideoRenderer)return Promise.resolve(window.FuraticOBSCreateVideoRenderer);
     if(library)return library;
     library=new Promise((resolve,reject)=>{
-      const script=libraryScript=document.createElement('script');script.src=origin+'/obs-video-renderer.js?v=2';
+      const script=libraryScript=document.createElement('script');script.src=origin+'/obs-video-renderer.js?v=3';
       script.onload=()=>{script.onload=script.onerror=null;window.FuraticOBSCreateVideoRenderer?resolve(window.FuraticOBSCreateVideoRenderer):reject(new Error('Player unavailable'));};
       script.onerror=()=>{script.onload=script.onerror=null;script.remove();libraryScript=null;library=null;reject(new Error('Player unavailable'));};
       document.head.appendChild(script);
