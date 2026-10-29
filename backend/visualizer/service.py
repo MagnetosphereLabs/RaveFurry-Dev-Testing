@@ -126,9 +126,13 @@ def create_app(capture, port):
 
     async def asset(request):
         name = request.match_info['name']
-        if name not in ('FuraticLogo.png', 'FuraticLogoWide.png'):
+        if name in ('FuraticLogo.png', 'FuraticLogoWide.png'):
+            mime = 'image/png'
+        elif name in ('award-1.wav', 'award-2.wav', 'award-3.wav'):
+            mime = 'audio/wav'
+        else:
             raise web.HTTPNotFound()
-        return web.FileResponse(ASSETS/name, headers={'Content-Type': 'image/png'})
+        return web.FileResponse(ASSETS/name, headers={'Content-Type': mime})
 
     def authorize(request):
         if not publish_token or not hmac.compare_digest(request.headers.get('Authorization', ''), 'Bearer ' + publish_token):
@@ -457,3 +461,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

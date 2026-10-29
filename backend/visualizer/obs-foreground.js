@@ -149,18 +149,58 @@
     const storageKey='furatic.obs.afterhours.v1';
     let stopped=false,active=false,showing=true,cutoff=0,eventId='',results=null,requested='',resultsAbort=null;
     let root=null,content=null,stage='none',stageAt=0,deadline=0,raf=0,index=-1,rowBase=-1,scrollStart=0,rows=[],thanks=null,listRowSize=0,listHeight=0,returnAt=0,returnFrom=0;
-    const layouts=new Set(),imageKeys=new Map();let pendingTimer=0,retireTimer=0,retiring=null,panelSerial=0;
+    const layouts=new Set(),imageKeys=new Map(),awardTimers=new Map();let pendingTimer=0,retireTimer=0,retiring=null,panelSerial=0;
+    let awardAudio=null,awardAudioRank=0,awardAudioTimer=0;
     const storage={read(){try{return JSON.parse(localStorage.getItem(storageKey)||'null');}catch(_){return null;}},write(value){try{localStorage.setItem(storageKey,JSON.stringify(value));}catch(_){}}};
     const text=(element,value,digits=false)=>{layouts.add(element);ui.text(element,value,digits);};
     const label=(element,value)=>{layouts.add(element);ui.label(element,value);};
+    function awardPhase(panel,delay,run){
+      const timer=setTimeout(()=>{awardTimers.delete(timer);if(active&&showing&&panel.isConnected)run();},delay);
+      awardTimers.set(timer,panel);
+    }
+    function cancelAwardPhases(panel=null){
+      for(const [timer,owner] of awardTimers)if(!panel||panel===owner||panel.contains(owner)){clearTimeout(timer);awardTimers.delete(timer);}
+    }
+    function releaseAwardSound(){
+      clearTimeout(awardAudioTimer);awardAudioTimer=0;
+      const sound=awardAudio;awardAudio=null;awardAudioRank=0;
+      if(!sound)return;
+      sound.onended=sound.onerror=null;sound.pause();sound.removeAttribute('src');sound.load();
+    }
+    function prepareAwardSound(rank){
+      if(!active||!showing||rank<1||rank>Math.min(3,results?.songs.length||0))return;
+      if(awardAudio&&awardAudioRank===rank)return;
+      releaseAwardSound();
+      // One small, pre-rendered PCM cue at a time. Loading the next rank in
+      // the quiet hold avoids decoding/synthesizing effects during a reveal.
+      const sound=new Audio();awardAudio=sound;awardAudioRank=rank;
+      sound.preload='auto';sound.volume=.85;sound.loop=false;
+      sound.onerror=()=>{if(awardAudio===sound)releaseAwardSound();};
+      sound.onended=()=>{
+        if(awardAudio!==sound)return;
+        releaseAwardSound();
+        if(stage==='winner'&&index===rank-1)prepareAwardSound(rank+1);
+      };
+      sound.src=origin+'/assets/award-'+rank+'.wav';sound.load();
+      awardAudioTimer=setTimeout(()=>{if(awardAudio===sound)releaseAwardSound();},16000);
+    }
+    function playAwardSound(rank){
+      prepareAwardSound(rank);const sound=awardAudio;if(!sound)return;
+      clearTimeout(awardAudioTimer);
+      // A stalled/missing file cannot leave a media pipeline alive or delay
+      // the presentation. Rejected autoplay never retries in the background.
+      awardAudioTimer=setTimeout(()=>{if(awardAudio===sound)releaseAwardSound();},8000);
+      try{const playing=sound.play();playing?.catch(()=>{if(awardAudio===sound)releaseAwardSound();});}
+      catch(_error){if(awardAudio===sound)releaseAwardSound();}
+    }
     function cancelGraphics(panel=null){for(const [key,canvas] of imageKeys)if(!panel||panel.contains(canvas)){cancelImage(key);imageKeys.delete(key);}}
     function releasePanel(panel){
       if(!panel)return;for(const element of [...layouts])if(panel===element||panel.contains(element)){ui.release(element);layouts.delete(element);}
-      cancelGraphics(panel);
+      cancelAwardPhases(panel);cancelGraphics(panel);
       ui.remove(panel);
     }
     function clearStage(){
-      cancelGraphics();if(root){for(const child of [...root.children])releasePanel(child);}rows=[];content=thanks=null;rowBase=-1;
+      releaseAwardSound();cancelAwardPhases();cancelGraphics();if(root){for(const child of [...root.children])releasePanel(child);}rows=[];content=thanks=null;rowBase=-1;
     }
     function cover(canvas,video,key,size=512,reveal=true){
       cancelImage(key);imageKeys.delete(key);canvas.width=canvas.height=0;canvas.classList.remove('has-artwork');
@@ -191,6 +231,7 @@
     }
     function exitThen(next){
       const panel=content?.lastElementChild;if(!panel){next();return;}
+      cancelAwardPhases(panel);
       ui.animate(panel,[{opacity:1,transform:'none'},{opacity:0,transform:panel.classList.contains('obs-chart')?'translateY(6vh)':'translateX(-24vw) translateY(-1vh) scale(.94) rotate(-2deg)'}],{duration:650,easing:ease});
       clearTimeout(pendingTimer);pendingTimer=setTimeout(()=>{
         if(!active||!showing)return;
@@ -219,17 +260,68 @@
       index=position;stage='winner';stageAt=performance.now();deadline=stageAt+10000;
       const song=results.songs[position],rank=position+1;
       const panel=document.createElement('section');panel.className='obs-winner';panel.dataset.rank=String(rank);
-      panel.innerHTML='<div class="obs-winner-float"><div class="obs-winner-heading"><div class="obs-winner-kicker obs-text-viewport"></div><div class="obs-winner-place obs-text-viewport"></div></div><div class="obs-winner-body"><div class="obs-winner-art"><canvas></canvas></div><div class="obs-winner-copy"><div class="obs-winner-title obs-text-viewport"></div><div class="obs-winner-artist obs-text-viewport"></div><div class="obs-winner-meta"><div class="obs-winner-votes obs-text-viewport"></div><div class="obs-winner-duration obs-text-viewport"></div></div></div></div><div class="obs-winner-footer obs-text-viewport"></div></div>';
-      const medal=trophy(rank);panel.querySelector('.obs-winner-heading').prepend(medal);enter(panel,position?'right':'center');
-      ui.animate(medal,[{opacity:0,transform:'translateY(1.2em) scale(.25) rotate(-22deg)',filter:'blur(7px)'},{opacity:1,transform:'translateY(-.1em) scale(1.14) rotate(3deg)',filter:'none',offset:.72},{opacity:1,transform:'scale(.985) rotate(-.5deg)',offset:.9},{opacity:1,transform:'none',filter:'none'}],{duration:1150,delay:150,easing:ease});
-      ui.animate(panel.querySelector('.obs-winner-art'),[{opacity:0,transform:'translateY(1em) scale(.82) rotate(-6deg)',filter:'blur(6px)'},{opacity:1,transform:'scale(1.025) rotate(.5deg)',filter:'none',offset:.8},{opacity:1,transform:'none',filter:'none'}],{duration:1050,delay:260,easing:ease});
-      text(panel.querySelector('.obs-winner-kicker'),'FINAL EVENT RESULTS');
-      text(panel.querySelector('.obs-winner-place'),['FIRST PLACE','SECOND PLACE','THIRD PLACE'][position]);
-      text(panel.querySelector('.obs-winner-title'),song.title);text(panel.querySelector('.obs-winner-artist'),song.artist);
-      text(panel.querySelector('.obs-winner-votes'),song.votes+' '+(song.votes===1?'VOTE':'VOTES'));
-      const seconds=Math.max(0,Math.floor(song.duration));text(panel.querySelector('.obs-winner-duration'),String(Math.floor(seconds/60)).padStart(2,'0')+':'+String(seconds%60).padStart(2,'0'),true);
-      text(panel.querySelector('.obs-winner-footer'),'FURATIC · PASS THE AUX!');cover(panel.querySelector('canvas'),song.videoId,'showcase-winner',768);
-      ['kicker','place','title','artist','meta','footer'].forEach((name,i)=>ui.animate(panel.querySelector('.obs-winner-'+name),[{opacity:0,transform:'translate(.45em,.4em)'},{opacity:1,transform:'none'}],{duration:620,delay:100+i*85,easing:ease}));
+      panel.innerHTML='<div class="obs-winner-float"><div class="obs-award-emblem"></div><div class="obs-winner-heading"><div class="obs-winner-kicker obs-text-viewport"></div><div class="obs-winner-place obs-text-viewport"></div></div><div class="obs-winner-body"><div class="obs-winner-art"><canvas></canvas></div><div class="obs-winner-copy"><div class="obs-winner-title obs-text-viewport"></div><div class="obs-winner-artist obs-text-viewport"></div><div class="obs-winner-meta"><div class="obs-winner-votes obs-text-viewport"></div><div class="obs-winner-duration obs-text-viewport"></div></div></div></div></div>';
+      const emblem=panel.querySelector('.obs-award-emblem'),medal=trophy(rank),art=panel.querySelector('.obs-winner-art');
+      emblem.appendChild(medal);content.appendChild(panel);
+      playAwardSound(rank);
+      // Reserve the final text geometry without running every glyph effect at
+      // once. Each phase replaces its plain label using the existing text UI.
+      const seconds=Math.max(0,Math.floor(song.duration));
+      const values={kicker:'FINAL EVENT RESULTS',place:['FIRST PLACE','SECOND PLACE','THIRD PLACE'][position],title:song.title,artist:song.artist,
+        votes:song.votes+' '+(song.votes===1?'VOTE':'VOTES'),duration:String(Math.floor(seconds/60)).padStart(2,'0')+':'+String(seconds%60).padStart(2,'0')};
+      for(const [name,value] of Object.entries(values)){
+        const field=panel.querySelector('.obs-winner-'+name);field.textContent=value;field.setAttribute('aria-label',value);field.style.visibility='hidden';
+      }
+      art.style.opacity='0';cover(art.querySelector('canvas'),song.videoId,'showcase-winner',768,false);
+      const travel=rank===1?26:rank===2?14:5,duration=rank===1?1600:rank===2?1250:950;
+      const shift='translateX(calc(var(--p)*'+travel+'))';
+      ui.animate(emblem,[
+        {opacity:0,transform:shift+' translateY(1em) scale(.18) rotate(-32deg)',easing:ease},
+        {opacity:1,transform:shift+' translateY(-.15em) scale('+(rank===1?1.20:1.10)+') rotate(7deg)',offset:.35,easing:'ease-in-out'},
+        {opacity:1,transform:shift+' scale(1.06) rotate(-3deg)',offset:.50,easing:ease},
+        {opacity:1,transform:'translateX(-.2em) scale(1.025) rotate(1deg)',offset:.88,easing:'ease-out'},
+        {opacity:1,transform:'none'},
+      ],{duration,easing:'linear'});
+      const crown=medal.querySelector('.vote-notice-crown');
+      if(rank===1&&crown)ui.animate(crown,[{opacity:0,transform:'translateY(-.7em) scale(.3)'},{opacity:1,transform:'translateY(.08em) scale(1.12)',offset:.72},{opacity:1,transform:'none'}],{duration:600,delay:250,easing:ease});
+      awardBurst(panel,emblem,rank);
+      const reveal=(name,delay,digits=false)=>awardPhase(panel,delay,()=>{
+        const field=panel.querySelector('.obs-winner-'+name);field.textContent='';field.style.visibility='visible';text(field,values[name],digits);
+        ui.animate(field,[{opacity:0,transform:'translate(.7em,.35em) scale(.96)'},{opacity:1,transform:'translateX(-.04em) scale(1.015)',offset:.8},{opacity:1,transform:'none'}],{duration:620,easing:ease});
+      });
+      // Badge, heading, artwork, then song/artist/votes. Heavy reveals have
+      // separate start times; no particle loop, extra canvas or WebGL context.
+      reveal('kicker',duration-400);reveal('place',duration-250);
+      awardPhase(panel,duration+120,()=>{
+        ui.animate(art,[{opacity:0,transform:'translateX(2em) scale(.68) rotate(12deg)'},{opacity:1,transform:'translateX(-.12em) scale(1.045) rotate(-2deg)',offset:.78},{opacity:1,transform:'none'}],{duration:850,easing:ease});
+        if(rank<3){
+          const sheen=document.createElement('span');sheen.className='obs-award-sheen';sheen.setAttribute('aria-hidden','true');art.appendChild(sheen);
+          ui.animate(sheen,[{opacity:0,transform:'translateX(-70%)'},{opacity:rank===1?.7:.4,offset:.35},{opacity:0,transform:'translateX(70%)'}],{duration:650,delay:500,easing:'ease-in-out'});
+          awardPhase(panel,1250,()=>ui.remove(sheen));
+        }
+      });
+      reveal('title',duration+420);reveal('artist',duration+680);reveal('votes',duration+970);reveal('duration',duration+1120,true);
+    }
+    function awardBurst(panel,emblem,rank){
+      const ns='http://www.w3.org/2000/svg',svg=document.createElementNS(ns,'svg');
+      svg.setAttribute('class','obs-award-burst');svg.setAttribute('viewBox','0 0 200 200');svg.setAttribute('aria-hidden','true');
+      // At most two rings and twelve stars, rasterized only for this brief
+      // reveal. Removing the SVG also cancels/detaches every native effect.
+      const rings=rank===1?2:rank===2?1:0;
+      for(let i=0;i<rings;i++){
+        const ring=document.createElementNS(ns,'g'),circle=document.createElementNS(ns,'circle');
+        circle.setAttribute('cx','100');circle.setAttribute('cy','100');circle.setAttribute('r','68');circle.setAttribute('fill','none');circle.setAttribute('stroke','currentColor');circle.setAttribute('stroke-width',i?'1':'2');
+        ring.appendChild(circle);svg.appendChild(ring);
+        ui.animate(ring,[{opacity:0,transform:'scale(.35)'},{opacity:i?.6:.9,offset:.2},{opacity:0,transform:'scale(1.32)'}],{duration:900,delay:300+i*160,easing:ease});
+      }
+      const stars=document.createElementNS(ns,'g'),count=rank===1?12:rank===2?8:4;
+      for(let i=0;i<count;i++){
+        const a=(i/count*Math.PI*2)-Math.PI/2,r=i%2?79:88,x=100+Math.cos(a)*r,y=100+Math.sin(a)*r,s=i%2?2.3:4.3;
+        const star=document.createElementNS(ns,'path');star.setAttribute('d',`M${x} ${y-s*1.7}L${x+s*.45} ${y-s*.45}L${x+s*1.7} ${y}L${x+s*.45} ${y+s*.45}L${x} ${y+s*1.7}L${x-s*.45} ${y+s*.45}L${x-s*1.7} ${y}L${x-s*.45} ${y-s*.45}Z`);star.setAttribute('fill','currentColor');stars.appendChild(star);
+      }
+      svg.appendChild(stars);emblem.prepend(svg);
+      ui.animate(stars,[{opacity:0,transform:'scale(.35) rotate(-18deg)'},{opacity:1,transform:'scale(.86) rotate(-4deg)',offset:.3},{opacity:0,transform:'scale(1.1) rotate(8deg)'}],{duration:rank===1?1150:rank===2?900:650,delay:rank===1?400:300,easing:ease});
+      awardPhase(panel,1800,()=>ui.remove(svg));
     }
     function showList(){
       stage='list';stageAt=performance.now();scrollStart=stageAt+2500;rowBase=-1;deadline=0;listRowSize=listHeight=returnAt=returnFrom=0;
@@ -289,7 +381,7 @@
         });
       }
       rows.forEach((row,i)=>{row.style.transform='translateY('+(i*rowHeight-(offset-base*rowHeight))+'px)';});
-      if(returnAt){if(now>=returnAt+2200)exitThen(()=>showThanks(true));}
+      if(returnAt){if(now>=returnAt+1800)stage='list-hold';}
       else if(elapsed>=duration){if(!deadline)deadline=now+4000;if(now>=deadline){returnAt=now;returnFrom=maximum;}}
       else deadline=0;
     }
@@ -302,6 +394,7 @@
         if(ticket!==eventId||!active||!showing||value.version!==1||value.eventId!==eventId||!Array.isArray(value.songs)||value.songs.length>50)return;
         if(!value.songs.every(song=>song&&typeof song.title==='string'&&song.title.length<=2000&&typeof song.artist==='string'&&song.artist.length<=2000&&Number.isFinite(song.votes)&&Number.isFinite(song.duration)&&typeof song.videoId==='string'&&(!song.videoId||/^[A-Za-z0-9_-]{11}$/.test(song.videoId))))return;
         results=value;requested=eventId;
+        if(stage==='entering'||stage==='thanks')prepareAwardSound(1);
       }catch(_error){/* Retry on the existing metadata poll, not a request loop. */}
       finally{clearTimeout(timeout);if(resultsAbort===abort)resultsAbort=null;}
     }
@@ -329,7 +422,7 @@
     }
     function finish(restore=true){
       if(!active)return;active=false;clearTimeout(pendingTimer);pendingTimer=0;cancelAnimationFrame(raf);raf=0;
-      resultsAbort?.abort();resultsAbort=null;cancelGraphics();
+      resultsAbort?.abort();resultsAbort=null;releaseAwardSound();cancelAwardPhases();cancelGraphics();
       clearTimeout(retireTimer);if(retiring)releasePanel(retiring);
       retiring=root;root=null;if(retiring){
         const outgoing=retiring;outgoing.removeAttribute('id');
@@ -371,7 +464,7 @@
       else{root.hidden=false;showThanks(true);fetchResults();schedule();}
     }
     let obsShowing=true;
-    const resize=()=>{listRowSize=listHeight=0;};window.addEventListener('resize',resize);
+    const resize=()=>{listRowSize=listHeight=0;if(stage==='list-hold')updateList(performance.now());};window.addEventListener('resize',resize);
     window.addEventListener('obsSourceVisibleChanged',visibility);document.addEventListener('visibilitychange',visibility);
     window.addEventListener('pagehide',()=>{
       stopped=true;active=false;clearTimeout(pendingTimer);clearTimeout(retireTimer);cancelAnimationFrame(raf);resultsAbort?.abort();clearStage();root?.remove();root=null;if(retiring)releasePanel(retiring);retiring=null;results=null;
@@ -382,4 +475,5 @@
     if(ui.snapshot)api.receive(ui.snapshot);
   };
 })();
+
 
