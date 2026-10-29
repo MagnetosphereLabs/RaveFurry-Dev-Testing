@@ -470,6 +470,18 @@
       for(const element of texts.keys())marquee(element);
     },
     text(element,value,digits=false) { resize.observe(element); typeText(element,value,digits); },
+    label(element,value) {
+      // Recycled chart rows enter as a group. One text surface per label keeps
+      // their shared marquee without creating hundreds of glyph animations.
+      const text=String(value??'');if(texts.get(element)?.text===text)return;
+      resize.observe(element);element.setAttribute('aria-label',text);
+      disposeAnimation(marquees.get(element)?.animation);marquees.delete(element);
+      for(const node of [...element.children])removeNode(node);
+      const content=textContent(element);content.textContent=text;element.appendChild(content);
+      texts.set(element,{text,content,digits:false});
+      clearTimeout(layouts.get(element));
+      layouts.set(element,setTimeout(()=>{layouts.delete(element);if(!stopped)marquee(element);},30));
+    },
     animate, paint:paintBitmap, remove:removeNode, release:releaseText,
     get snapshot() { return snapshot; },
     suspend() {
@@ -506,3 +518,4 @@
   window.FuraticOBSStartPresentation?.();
   visibility();
 })();
+

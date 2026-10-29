@@ -148,10 +148,11 @@
     const bar=document.getElementById('obs-topbar');
     const storageKey='furatic.obs.afterhours.v1';
     let stopped=false,active=false,showing=true,cutoff=0,eventId='',results=null,requested='',resultsAbort=null;
-    let root=null,stage='none',stageAt=0,deadline=0,raf=0,index=-1,rowBase=-1,scrollStart=0,rows=[],hero=null,thanks=null,listRowSize=0;
+    let root=null,content=null,stage='none',stageAt=0,deadline=0,raf=0,index=-1,rowBase=-1,scrollStart=0,rows=[],thanks=null,listRowSize=0,listHeight=0,returnAt=0,returnFrom=0;
     const layouts=new Set(),imageKeys=new Map();let pendingTimer=0,retireTimer=0,retiring=null,panelSerial=0;
     const storage={read(){try{return JSON.parse(localStorage.getItem(storageKey)||'null');}catch(_){return null;}},write(value){try{localStorage.setItem(storageKey,JSON.stringify(value));}catch(_){}}};
     const text=(element,value,digits=false)=>{layouts.add(element);ui.text(element,value,digits);};
+    const label=(element,value)=>{layouts.add(element);ui.label(element,value);};
     function cancelGraphics(panel=null){for(const [key,canvas] of imageKeys)if(!panel||panel.contains(canvas)){cancelImage(key);imageKeys.delete(key);}}
     function releasePanel(panel){
       if(!panel)return;for(const element of [...layouts])if(panel===element||panel.contains(element)){ui.release(element);layouts.delete(element);}
@@ -159,15 +160,15 @@
       ui.remove(panel);
     }
     function clearStage(){
-      cancelGraphics();if(root){for(const child of [...root.children])releasePanel(child);}rows=[];hero=thanks=null;rowBase=-1;
+      cancelGraphics();if(root){for(const child of [...root.children])releasePanel(child);}rows=[];content=thanks=null;rowBase=-1;
     }
-    function cover(canvas,video,key,size=512){
+    function cover(canvas,video,key,size=512,reveal=true){
       cancelImage(key);imageKeys.delete(key);canvas.width=canvas.height=0;canvas.classList.remove('has-artwork');
       if(!video)return;
       imageKeys.set(key,canvas);loadImage(key,'/results-artwork/'+video,bitmap=>{
         if(!active||!showing||!canvas.isConnected)return;
         ui.paint(canvas,bitmap,size);canvas.classList.add('has-artwork');
-        ui.animate(canvas,[{opacity:0,transform:'scale(.94)',filter:'blur(3px)'},{opacity:1,transform:'none',filter:'none'}],{duration:420,easing:ease});
+        if(reveal)ui.animate(canvas,[{opacity:0,transform:'scale(.94)',filter:'blur(3px)'},{opacity:1,transform:'none',filter:'none'}],{duration:420,easing:ease});
       },size);
     }
     function trophy(rank){
@@ -182,52 +183,58 @@
       return node;
     }
     function enter(panel,direction='center'){
-      root.appendChild(panel);
+      content.appendChild(panel);
       const from=direction==='right'?'translateX(20vw) scale(.94) rotate(2deg)':direction==='bottom'?'translateY(18vh) scale(.95)':'translateY(2vh) scale(.72) rotate(-2deg)';
-      ui.animate(panel,[{opacity:0,transform:from,filter:'blur(13px)'},{opacity:1,transform:'translate(0,-.35vh) scale(1.015) rotate(.25deg)',filter:'blur(0px)',offset:.76},{opacity:1,transform:'none',filter:'none'}],{duration:1050,easing:ease});
+      // The glass stays stationary. Animate only the content, avoiding a new
+      // full-panel blur surface while the chart's labels/artwork are prepared.
+      ui.animate(panel,[{opacity:0,transform:from},{opacity:1,transform:'translate(0,-.2vh) scale(1.008)',offset:.8},{opacity:1,transform:'none'}],{duration:1050,easing:ease});
     }
     function exitThen(next){
-      const panel=root?.lastElementChild;if(!panel){next();return;}
-      ui.animate(panel,[{opacity:1,transform:'none',filter:'none'},{opacity:0,transform:'translateX(-24vw) translateY(-1vh) scale(.94) rotate(-2deg)',filter:'blur(12px)'}],{duration:650,easing:ease});
+      const panel=content?.lastElementChild;if(!panel){next();return;}
+      ui.animate(panel,[{opacity:1,transform:'none'},{opacity:0,transform:panel.classList.contains('obs-chart')?'translateY(6vh)':'translateX(-24vw) translateY(-1vh) scale(.94) rotate(-2deg)'}],{duration:650,easing:ease});
       clearTimeout(pendingTimer);pendingTimer=setTimeout(()=>{
         if(!active||!showing)return;
-        rows=[];hero=thanks=null;rowBase=-1;next();
+        rows=[];rowBase=-1;next();
         pendingTimer=setTimeout(()=>{pendingTimer=0;releasePanel(panel);},490);
       },180);
     }
     function showThanks(final=false){
       stage=final?'thanks-final':'thanks';stageAt=performance.now();deadline=stageAt+7500;
-      const panel=document.createElement('section');panel.className='obs-showcase-glass obs-thanks';
+      if(!content){content=document.createElement('div');content.className='obs-showcase-stage';root.appendChild(content);}
+      if(thanks)return;
+      const panel=document.createElement('section');panel.className='obs-thanks';
       panel.innerHTML='<div class="obs-thanks-float"><canvas class="obs-thanks-brand" aria-label="FURATIC Pass The Aux"></canvas><div class="obs-thanks-heading obs-text-viewport"></div><div class="obs-thanks-copy obs-text-viewport"></div><div class="obs-thanks-schedule obs-text-viewport"></div><div class="obs-thanks-url obs-text-viewport"></div></div>';
-      thanks=panel.querySelector('.obs-thanks-float');enter(panel);
+      thanks=panel;root.insertBefore(panel,content);
+      ui.animate(panel,[{opacity:0,transform:'translateY(2vh) scale(.97)'},{opacity:1,transform:'none'}],{duration:1050,easing:ease});
       text(panel.querySelector('.obs-thanks-heading'),'THANKS FUR COMING!');
       text(panel.querySelector('.obs-thanks-copy'),'Liked this event? Join the group and follow us for more');
       text(panel.querySelector('.obs-thanks-schedule'),'Every Friday at 4:30PM ET!');
       text(panel.querySelector('.obs-thanks-url'),'FURATIC.XYZ');
       const canvas=panel.querySelector('canvas');imageKeys.set('showcase-brand',canvas);
+      [...panel.querySelector('.obs-thanks-float').children].forEach((item,i)=>ui.animate(item,[{opacity:0,transform:'translateY(.65em)'},{opacity:1,transform:'none'}],{duration:640,delay:i*75,easing:ease}));
       loadImage('showcase-brand','/assets/FuraticLogoWide.png',bitmap=>{if(active&&canvas.isConnected)ui.paint(canvas,bitmap,1024,630,true);},1024);
     }
     function showWinner(position){
       if(!results||position>=Math.min(3,results.songs.length)){showList();return;}
       index=position;stage='winner';stageAt=performance.now();deadline=stageAt+10000;
       const song=results.songs[position],rank=position+1;
-      const panel=document.createElement('section');panel.className='obs-showcase-glass obs-winner';panel.dataset.rank=String(rank);
+      const panel=document.createElement('section');panel.className='obs-winner';panel.dataset.rank=String(rank);
       panel.innerHTML='<div class="obs-winner-float"><div class="obs-winner-heading"><div class="obs-winner-kicker obs-text-viewport"></div><div class="obs-winner-place obs-text-viewport"></div></div><div class="obs-winner-body"><div class="obs-winner-art"><canvas></canvas></div><div class="obs-winner-copy"><div class="obs-winner-title obs-text-viewport"></div><div class="obs-winner-artist obs-text-viewport"></div><div class="obs-winner-meta"><div class="obs-winner-votes obs-text-viewport"></div><div class="obs-winner-duration obs-text-viewport"></div></div></div></div><div class="obs-winner-footer obs-text-viewport"></div></div>';
-      hero=panel.querySelector('.obs-winner-float');
       const medal=trophy(rank);panel.querySelector('.obs-winner-heading').prepend(medal);enter(panel,position?'right':'center');
       ui.animate(medal,[{opacity:0,transform:'translateY(1.2em) scale(.25) rotate(-22deg)',filter:'blur(7px)'},{opacity:1,transform:'translateY(-.1em) scale(1.14) rotate(3deg)',filter:'none',offset:.72},{opacity:1,transform:'scale(.985) rotate(-.5deg)',offset:.9},{opacity:1,transform:'none',filter:'none'}],{duration:1150,delay:150,easing:ease});
-      ui.animate(panel.querySelector('.obs-winner-art'),[{opacity:0,transform:'translateY(1em) scale(.82) rotate(-6deg)',filter:'blur(6px)'},{opacity:1,transform:'scale(1.025) rotate(.5deg)',filter:'none',offset:.8},{opacity:1,transform:'none',filter:'none'}],{duration:1050,delay:100,easing:ease});
+      ui.animate(panel.querySelector('.obs-winner-art'),[{opacity:0,transform:'translateY(1em) scale(.82) rotate(-6deg)',filter:'blur(6px)'},{opacity:1,transform:'scale(1.025) rotate(.5deg)',filter:'none',offset:.8},{opacity:1,transform:'none',filter:'none'}],{duration:1050,delay:260,easing:ease});
       text(panel.querySelector('.obs-winner-kicker'),'FINAL EVENT RESULTS');
       text(panel.querySelector('.obs-winner-place'),['FIRST PLACE','SECOND PLACE','THIRD PLACE'][position]);
       text(panel.querySelector('.obs-winner-title'),song.title);text(panel.querySelector('.obs-winner-artist'),song.artist);
       text(panel.querySelector('.obs-winner-votes'),song.votes+' '+(song.votes===1?'VOTE':'VOTES'));
       const seconds=Math.max(0,Math.floor(song.duration));text(panel.querySelector('.obs-winner-duration'),String(Math.floor(seconds/60)).padStart(2,'0')+':'+String(seconds%60).padStart(2,'0'),true);
       text(panel.querySelector('.obs-winner-footer'),'FURATIC · PASS THE AUX!');cover(panel.querySelector('canvas'),song.videoId,'showcase-winner',768);
+      ['kicker','place','title','artist','meta','footer'].forEach((name,i)=>ui.animate(panel.querySelector('.obs-winner-'+name),[{opacity:0,transform:'translate(.45em,.4em)'},{opacity:1,transform:'none'}],{duration:620,delay:100+i*85,easing:ease}));
     }
     function showList(){
-      stage='list';stageAt=performance.now();scrollStart=stageAt+2500;rowBase=-1;deadline=0;listRowSize=0;
+      stage='list';stageAt=performance.now();scrollStart=stageAt+2500;rowBase=-1;deadline=0;listRowSize=listHeight=returnAt=returnFrom=0;
       if(!results?.songs.length){showThanks(true);return;}
-      const panel=document.createElement('section');panel.className='obs-showcase-glass obs-chart';
+      const panel=document.createElement('section');panel.className='obs-chart';
       panel.innerHTML='<header><div class="obs-chart-heading obs-text-viewport"></div><div class="obs-chart-subtitle obs-text-viewport"></div></header><div class="obs-chart-window"><div class="obs-chart-track"></div></div><div class="obs-chart-footer obs-text-viewport"></div>';
       enter(panel,'bottom');text(panel.querySelector('.obs-chart-heading'),"TOP SONGS FROM TODAY'S EVENT");text(panel.querySelector('.obs-chart-subtitle'),'Ranked by your votes');text(panel.querySelector('.obs-chart-footer'),'FURATIC · PASS THE AUX!');
       const track=panel.querySelector('.obs-chart-track');
@@ -236,12 +243,16 @@
         row._imageKey='showcase-row-'+i;track.appendChild(row);rows.push(row);
       }
       updateList(stageAt);
+      const visible=Math.min(rows.length,Math.ceil(listHeight/listRowSize)+1);
+      // Stagger only the initial viewport. Recycled/returning rows stay on
+      // their scrolling track without replaying entrance effects or blurs.
+      rows.slice(0,visible).forEach((row,i)=>[...row.children].forEach((cell,j)=>ui.animate(cell,[{opacity:0,transform:'translate(.4em,.6em)'},{opacity:1,transform:'none'}],{duration:480,delay:220+i*75+j*35,easing:ease})));
     }
     function updateList(now){
       if(!rows.length||!results)return;
       const viewport=root.querySelector('.obs-chart-window');
-      const rowHeight=listRowSize||(listRowSize=rows[0].getBoundingClientRect().height||Math.min(innerWidth/100,innerHeight/56.25)*5.4);
-      const height=viewport.clientHeight||rowHeight*6;
+      const rowHeight=listRowSize||(listRowSize=parseFloat(getComputedStyle(rows[0]).height)||Math.min(innerWidth/100,innerHeight/56.25)*4.6);
+      const height=listHeight||(listHeight=viewport.clientHeight||rowHeight*3);
       const maximum=Math.max(0,results.songs.length*rowHeight-height);
       // About 2.5 seconds per complete row, with eased acceleration/braking.
       const elapsed=Math.max(0,(now-scrollStart)/1000),speed=rowHeight/2.5,ramp=1.5;
@@ -253,11 +264,16 @@
       else if(elapsed>duration-ramp)offset=maximum-acceleration(duration-elapsed);
       else offset=speed*(elapsed-ramp/2);
       offset=clamp(offset,0,maximum);
+      if(returnAt){
+        const t=clamp((now-returnAt)/1800),smooth=t*t*t*(t*(t*6-15)+10);
+        offset=Math.min(returnFrom,maximum)*(1-smooth);
+      }
       const base=Math.min(Math.floor(offset/rowHeight),Math.max(0,results.songs.length-1));
       if(base!==rowBase){
         // Recycle the leading row as the next overscan row. The other seven
         // keep their exact artwork/text resources as they pass through view.
         while(rowBase>=0&&rowBase<base){const row=rows.shift();rows.push(row);rowBase++;}
+        while(rowBase>base){const row=rows.pop();rows.unshift(row);rowBase--;}
         rowBase=base;
         rows.forEach((row,i)=>{
           const n=base+i,song=results.songs[n];row.hidden=!song;
@@ -268,12 +284,13 @@
           }
           if(row.dataset.index===String(n))return;
           row.dataset.index=String(n);row.querySelector('.obs-chart-rank').textContent=String(n+1).padStart(2,'0');
-          text(row.querySelector('.obs-chart-title'),song.title);text(row.querySelector('.obs-chart-artist'),song.artist);text(row.querySelector('.obs-chart-votes'),song.votes+' '+(song.votes===1?'vote':'votes'));
-          cover(row.querySelector('canvas'),song.videoId,row._imageKey,192);
+          label(row.querySelector('.obs-chart-title'),song.title);label(row.querySelector('.obs-chart-artist'),song.artist);label(row.querySelector('.obs-chart-votes'),song.votes+' '+(song.votes===1?'vote':'votes'));
+          cover(row.querySelector('canvas'),song.videoId,row._imageKey,192,false);
         });
       }
       rows.forEach((row,i)=>{row.style.transform='translateY('+(i*rowHeight-(offset-base*rowHeight))+'px)';});
-      if(elapsed>=duration){if(!deadline)deadline=now+4000;if(now>=deadline)exitThen(()=>showThanks(true));}
+      if(returnAt){if(now>=returnAt+2200)exitThen(()=>showThanks(true));}
+      else if(elapsed>=duration){if(!deadline)deadline=now+4000;if(now>=deadline){returnAt=now;returnFrom=maximum;}}
       else deadline=0;
     }
     async function fetchResults(){
@@ -292,11 +309,8 @@
     function tick(now){
       raf=0;if(!active||!showing||stopped)return;
       if(Date.now()>=cutoff){finish();return;}
-      const age=(now-stageAt)/1000;
-      if(hero)hero.style.transform='translate('+Math.sin(age*.69)*4+'px,'+Math.sin(age*.92)*5+'px) rotate('+Math.sin(age*.47)*.18+'deg)';
-      if(thanks)thanks.style.transform='translateY('+Math.sin(age*.8)*4+'px)';
       if(!pendingTimer){
-        if(stage==='thanks'&&now>=deadline){if(results?.songs.length)exitThen(()=>showWinner(0));else if(results)stage='thanks-final';}
+        if(stage==='thanks'&&now>=deadline){if(results?.songs.length)showWinner(0);else if(results)stage='thanks-final';}
         else if(stage==='winner'&&now>=deadline)exitThen(()=>showWinner(index+1));
         else if(stage==='list')updateList(now);
       }
@@ -306,6 +320,7 @@
       clearTimeout(retireTimer);if(retiring){releasePanel(retiring);retiring=null;}
       active=true;eventId=event.eventId;cutoff=expires;results=null;requested='';stage='entering';
       root=document.createElement('div');root.id='obs-showcase';root.className='obs-showcase-root';root.setAttribute('aria-label','Event celebration');document.body.appendChild(root);
+      ui.animate(root,[{opacity:0},{opacity:1}],{duration:650,easing:ease});
       window.FuraticOBSForeground?.setEnabled(false);
       window.dispatchEvent(new Event('furatic:scenechange'));
       ui.animate(bar,[{opacity:1,transform:'none',filter:'none'},{opacity:0,transform:'translateY(-115%) scale(.985)',filter:'blur(5px)'}],{duration:650,easing:ease});
@@ -318,10 +333,11 @@
       clearTimeout(retireTimer);if(retiring)releasePanel(retiring);
       retiring=root;root=null;if(retiring){
         const outgoing=retiring;outgoing.removeAttribute('id');
-        for(const panel of outgoing.children)ui.animate(panel,[{opacity:1,transform:'none',filter:'none'},{opacity:0,transform:'translateY(-3vh) scale(.94)',filter:'blur(10px)'}],{duration:600,easing:ease});
+        ui.animate(outgoing,[{opacity:1},{opacity:0}],{duration:600,easing:ease});
+        for(const panel of outgoing.children)ui.animate(panel,[{opacity:1,transform:'none'},{opacity:0,transform:'translateY(-3vh) scale(.97)'}],{duration:600,easing:ease});
         retireTimer=setTimeout(()=>{releasePanel(outgoing);if(retiring===outgoing)retiring=null;retireTimer=0;},620);
       }
-      rows=[];hero=thanks=null;stage='none';results=null;requested='';
+      rows=[];content=thanks=null;stage='none';results=null;requested='';
       if(!restore)return;
       window.FuraticOBSForeground?.setEnabled(true);ui.resume();
       window.dispatchEvent(new Event('furatic:scenechange'));
@@ -350,12 +366,12 @@
       if(event?.type==='obsSourceVisibleChanged'&&typeof event.detail?.visible==='boolean')obsShowing=event.detail.visible;
       showing=obsShowing&&!document.hidden;
       if(!active)return;
-      if(!showing){cancelAnimationFrame(raf);raf=0;resultsAbort?.abort();clearTimeout(pendingTimer);pendingTimer=0;clearStage();stage='hidden';ui.suspend();}
+      if(!showing){cancelAnimationFrame(raf);raf=0;resultsAbort?.abort();clearTimeout(pendingTimer);pendingTimer=0;clearStage();root.hidden=true;stage='hidden';ui.suspend();}
       else if(Date.now()>=cutoff)finish();
-      else{showThanks(true);fetchResults();schedule();}
+      else{root.hidden=false;showThanks(true);fetchResults();schedule();}
     }
     let obsShowing=true;
-    const resize=()=>{listRowSize=0;};window.addEventListener('resize',resize);
+    const resize=()=>{listRowSize=listHeight=0;};window.addEventListener('resize',resize);
     window.addEventListener('obsSourceVisibleChanged',visibility);document.addEventListener('visibilitychange',visibility);
     window.addEventListener('pagehide',()=>{
       stopped=true;active=false;clearTimeout(pendingTimer);clearTimeout(retireTimer);cancelAnimationFrame(raf);resultsAbort?.abort();clearStage();root?.remove();root=null;if(retiring)releasePanel(retiring);retiring=null;results=null;
@@ -366,3 +382,4 @@
     if(ui.snapshot)api.receive(ui.snapshot);
   };
 })();
+
