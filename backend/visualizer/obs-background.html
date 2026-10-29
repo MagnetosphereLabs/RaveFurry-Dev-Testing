@@ -150,7 +150,7 @@ canvas{display:block;width:100%;height:100%}
 .obs-chart-footer{flex:none;text-align:center;font-size:calc(var(--p)*1);letter-spacing:.1em;color:#ccd8e7;padding-top:calc(var(--p)*.7)}
 /* Optional incoming video. No video node or decoder exists in Default layout. */
 #obs-video-window{position:fixed;z-index:1;transform:translate(-50%,-50%);touch-action:none;user-select:none;cursor:move}
-.obs-video-surface{width:100%;height:100%;position:relative;contain:layout paint;overflow:hidden;border-radius:18px;border:1px solid #ffffff30;box-shadow:0 12px 32px #0003;background:transparent}
+.obs-video-surface{width:100%;height:100%;position:relative;background:transparent}
 .obs-video-surface video{display:block;width:100%;height:100%;object-fit:contain;pointer-events:none;background:transparent}
 .obs-video-status{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:max-content;max-width:90%;padding:15px 22px;border-radius:16px;border:1px solid #ffffff30;background:#14223899;backdrop-filter:blur(9px);color:#edf5ff;font:400 20px/1.3 "Cracker Winter",sans-serif;text-align:center;pointer-events:none}
 .obs-video-status[hidden]{display:none}
@@ -1409,6 +1409,6 @@ canvas{display:block;width:100%;height:100%}
 })();
 </script>
 <script src="obs-topbar.js?v=2" defer></script>
-<script src="obs-video.js?v=3" defer></script>
+<script src="obs-video.js?v=4" defer></script>
 </body>
 </html>

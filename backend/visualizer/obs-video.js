@@ -7,6 +7,7 @@
   const ease='cubic-bezier(.22,1,.36,1)',clamp=(n,a,b)=>Math.max(a,Math.min(b,n));
   let state=null,token='',stopped=false,obsVisible=true,shown=false,root=null,surface=null,status=null;
   let player=null,socket=null,fetcher=null,library=null,libraryScript=null;
+  let retired=Promise.resolve();
   let generation=0,inputGeneration=-1,retry=0,reconnect=0,watch=0,retire=0,moveFrame=0;
   let effects=new Set(),drag=null,geometry=null,ratio=16/9,lastTime=0,lastProgress=0;
   let clientRetry=0,playerRetire=0,failures=0,loadTicket=0,blockedGeneration=-1;
@@ -31,7 +32,7 @@
   function teardownPlayer(clearRetry=true){
     ++generation;if(clearRetry){clearTimeout(clientRetry);clientRetry=0;}clearTimeout(playerRetire);playerRetire=0;clearInterval(watch);watch=0;
     const old=player;player=null;pictureVisible=false;revealAt=exitAt=0;
-    old?.close();lastTime=lastProgress=0;
+    if(old){const release=old.close();retired=Promise.all([retired,release]).then(()=>{},()=>{});}lastTime=lastProgress=0;
   }
   function releaseLease(){leaseAbort?.abort();leaseAbort=null;const release=leaseRelease;leaseRelease=null;if(leaseSupported)leaseOwned=false;release?.();}
   function acquireLease(){
@@ -132,7 +133,7 @@
     if(window.FuraticOBSCreateVideoRenderer)return Promise.resolve(window.FuraticOBSCreateVideoRenderer);
     if(library)return library;
     library=new Promise((resolve,reject)=>{
-      const script=libraryScript=document.createElement('script');script.src=origin+'/obs-video-renderer.js?v=1';
+      const script=libraryScript=document.createElement('script');script.src=origin+'/obs-video-renderer.js?v=2';
       script.onload=()=>{script.onload=script.onerror=null;window.FuraticOBSCreateVideoRenderer?resolve(window.FuraticOBSCreateVideoRenderer):reject(new Error('Player unavailable'));};
       script.onerror=()=>{script.onload=script.onerror=null;script.remove();libraryScript=null;library=null;reject(new Error('Player unavailable'));};
       document.head.appendChild(script);
@@ -150,7 +151,9 @@
     if(!active()||!leaseOwned||state.status!=='receiving'||player||clientRetry)return;const ticket=++loadTicket;
     try{
       const create=await loadLibrary();if(stopped||ticket!==loadTicket||!active())return;
-      teardownPlayer();const current=++generation;
+      teardownPlayer();await retired;
+      if(stopped||ticket!==loadTicket||!active()||!leaseOwned||state.status!=='receiving')return;
+      const current=++generation;
       player=create({origin,url:socketOrigin+'/video/live',volume:state.volume,muted:state.muted,
         onFrame(){if(current!==generation||!active())return;failures=0;showStatus('');
           if(!pictureVisible){pictureVisible=true;revealAt=performance.now();feedback('');}},

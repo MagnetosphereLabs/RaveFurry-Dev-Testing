@@ -2,24 +2,44 @@
 (() => {
   'use strict';
   window.FuraticOBSCreateVideoRenderer=function(options){
-    let dead=false,worker=null,context=null,node=null,gain=null,channel=null,workerURL=null;
+    let dead=false,worker=null,context=null,node=null,gain=null,channel=null,workerURL=null,closing=null;
     let pending=null,ahead=null,submitted=null,graphics=null,first=true,received=0,drawn=0,credited=0,lastSequence=0,audioStatus=null,graphicsUnavailable=false;
     const deferredCredits=[];
     const vertex=`#version 300 es
       precision highp float;uniform vec2 u_resolution;uniform vec4 u_rect;out vec2 uv;
-      void main(){vec2 p=vec2(gl_VertexID==1||gl_VertexID==3?1.:0.,gl_VertexID>=2?1.:0.);uv=p;
-      vec2 pixel=u_rect.xy+p*u_rect.zw;gl_Position=vec4(pixel.x/u_resolution.x*2.-1.,1.-pixel.y/u_resolution.y*2.,0.,1.);}`;
+      void main(){vec2 p=vec2(gl_VertexID==1||gl_VertexID==3?1.:0.,gl_VertexID>=2?1.:0.);
+      vec2 local=p*(u_rect.zw+vec2(128.,152.))-vec2(64.);uv=local/u_rect.zw;
+      vec2 pixel=u_rect.xy+local;gl_Position=vec4(pixel.x/u_resolution.x*2.-1.,1.-pixel.y/u_resolution.y*2.,0.,1.);}`;
     const fragment=`#version 300 es
       precision highp float;in vec2 uv;uniform sampler2D u_texture;
       uniform vec4 u_crop;uniform vec2 u_size;uniform float u_alpha;out vec4 color;
-      void main(){vec3 rgb=texture(u_texture,u_crop.xy+uv*u_crop.zw).rgb;
-      float radius=min(18.,min(u_size.x,u_size.y)*.5);vec2 p=abs(uv*u_size-u_size*.5)-(u_size*.5-radius);
-      float d=length(max(p,0.))+min(max(p.x,p.y),0.)-radius;float edge=max(.5,fwidth(d));
-      color=vec4(rgb,u_alpha*(1.-smoothstep(-edge,edge,d)));}`;
+      float rounded(vec2 p,float radius){p=abs(p)-(u_size*.5-radius);return length(max(p,0.))+min(max(p.x,p.y),0.)-radius;}
+      void main(){vec2 local=uv*u_size-u_size*.5;float radius=min(18.,min(u_size.x,u_size.y)*.5);
+      float d=rounded(local,radius),edge=max(.5,fwidth(d));float cover=1.-smoothstep(-edge,edge,d);
+      float border=cover*smoothstep(-1.-edge,-1.+edge,d);
+      float sd=max(0.,rounded(local-vec2(0.,12.),radius)),shadow=.2*exp(-sd*sd/512.);
+      float alpha=cover+(1.-cover)*shadow;vec3 rgb=texture(u_texture,u_crop.xy+clamp(uv,0.,1.)*u_crop.zw).rgb;
+      color=vec4(mix(rgb,vec3(1.),border*.188)*cover/max(alpha,.0001),u_alpha*alpha);}`;
     function ack(sequence){if(worker&&!dead){worker.postMessage({type:'ack',sequence});credited++;}}
-    function free(valid=true){
-      const old=graphics;graphics=null;
-      if(old&&valid){for(const texture of old.textures)old.gl.deleteTexture(texture);old.gl.deleteVertexArray(old.vao);old.gl.deleteProgram(old.program);}
+    function destroy(old,valid=true){
+      if(old&&valid){const gl=old.gl;gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,null);gl.bindVertexArray(null);gl.useProgram(null);
+        for(const texture of old.textures)gl.deleteTexture(texture);gl.deleteVertexArray(old.vao);gl.deleteProgram(old.program);gl.flush();}
+    }
+    function free(valid=true){const old=graphics;graphics=null;destroy(old,valid);}
+    function retireGraphics(){
+      const old=graphics;graphics=null;if(!old)return Promise.resolve();
+      const gl=old.gl;if(gl.isContextLost())return Promise.resolve();
+      // Retire the last native upload before another decoder/texture is created.
+      // This runs only at shutdown, never blocks the render or audio threads.
+      const fence=gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE,0);gl.flush();
+      return new Promise(resolve=>{
+        const poll=()=>{
+          if(gl.isContextLost()){resolve();return;}
+          const result=fence?gl.clientWaitSync(fence,0,0):gl.WAIT_FAILED;
+          if(result===gl.TIMEOUT_EXPIRED){setTimeout(poll,16);return;}
+          if(fence)gl.deleteSync(fence);destroy(old);resolve();
+        };poll();
+      });
     }
     function make(gl){
       const shaders=[],textures=[];let program=null,vao=null;
@@ -76,7 +96,7 @@
         if(ahead){pending.frame.close();ack(pending.sequence);pending=ahead;ahead=null;} // The enclosing scene fence owns this GPU submission.
         if(pending&&Date.now()-pending.arrivedAt>300){const sequence=pending.sequence;pending.frame.close();pending=null;ack(sequence);}
         if(dead||(!pending&&!graphics?.ready))return;
-        if(graphics?.gl!==gl)free(false);if(!graphics)make(gl);
+        if(graphics?.gl!==gl)free();if(!graphics)make(gl);
         const r=graphics;gl.useProgram(r.program);gl.bindVertexArray(r.vao);gl.pixelStorei(gl.UNPACK_ALIGNMENT,1);
         const frame=pending;pending=null;
         try{
@@ -85,7 +105,7 @@
           if(frame){submitted=frame.sequence;r.ready=true;drawn++;ack(frame.sequence);if(first){first=false;options.onFrame();}}
           gl.uniform2f(r.resolution,w,h);gl.uniform4fv(r.rect,rect);gl.uniform4fv(r.crop,crop);gl.uniform2f(r.size,rect[2],rect[3]);gl.uniform1f(r.alpha,alpha);
           gl.enable(gl.BLEND);gl.blendFunc(gl.SRC_ALPHA,gl.ONE_MINUS_SRC_ALPHA);gl.drawArrays(gl.TRIANGLE_STRIP,0,4);
-        }finally{frame?.frame.close();gl.disable(gl.BLEND);gl.bindVertexArray(null);gl.activeTexture(gl.TEXTURE0);}
+        }finally{frame?.frame.close();gl.disable(gl.BLEND);gl.bindVertexArray(null);gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,null);gl.useProgram(null);}
       },
       complete(){submitted=null;},
       graphicsLost(valid=false){
@@ -94,17 +114,21 @@
         pending=ahead=null;free(valid);api.complete();
       },
       close(){
-        if(dead)return;dead=true;pending?.frame.close();ahead?.frame.close();pending=ahead=null;submitted=null;deferredCredits.length=0;
+        if(closing)return closing;dead=true;pending?.frame.close();ahead?.frame.close();pending=ahead=null;submitted=null;deferredCredits.length=0;
+        const releases=[retireGraphics()];
         if(worker){
           const old=worker;worker=null;let deadline=0;
-          const terminate=()=>{clearTimeout(deadline);old.onmessage=old.onerror=null;old.terminate();};
-          old.onmessage=e=>{e.data.frame?.close();if(e.data.type==='stopped')terminate();};old.onerror=terminate;
-          old.postMessage({type:'stop'});deadline=setTimeout(terminate,150);
+          releases.push(new Promise(resolve=>{
+            const terminate=()=>{clearTimeout(deadline);old.onmessage=old.onerror=null;old.terminate();resolve();};
+            old.onmessage=e=>{e.data.frame?.close();if(e.data.type==='stopped')terminate();};old.onerror=terminate;
+            old.postMessage({type:'stop'});deadline=setTimeout(terminate,250);
+          }));
         }
         if(workerURL){URL.revokeObjectURL(workerURL);workerURL=null;}
         if(node){node.port.postMessage({type:'stop'});node.port.close();node.disconnect();node=null;}
         gain?.disconnect();gain=null;channel?.port1.close();channel?.port2.close();channel=null;
-        if(context){context.close().catch(()=>{});context=null;}free(true);
+        if(context){releases.push(context.close().catch(()=>{}));context=null;}
+        closing=Promise.all(releases).then(()=>{});return closing;
       },
       get stats(){return {received,drawn,credited,lastSequence,pending:(pending?1:0)+(ahead?1:0),inflight:submitted===null?0:1,textures:graphics?1:0,audioState:context?.state||'closed',audio:audioStatus};}
     };
