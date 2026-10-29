@@ -8,6 +8,7 @@ import copy
 import ctypes
 import ipaddress
 import json
+import logging
 import math
 import os
 from pathlib import Path
@@ -25,6 +26,26 @@ from .video_frames import FrameStore, MediaSession, read_avi, WIDTH, HEIGHT, FPS
 
 HERE = Path(__file__).parent
 MAX_QUEUE = 8  # Compatibility for diagnostics; media uses explicit frame credits.
+SRT_RECEIVE_LATENCY_MS = 4000
+SRT_RECEIVE_BYTES = 16 * 1024 * 1024
+SRT_UDP_RECEIVE_BYTES = 4 * 1024 * 1024
+SRT_IO_TIMEOUT_US = 20_000_000
+MEDIA_STALL_SECONDS = 30
+LOG = logging.getLogger('furatic.visualizer')
+
+
+async def receiver_log_lines(reader):
+    """Bounded CR/LF log parsing: progress/library output cannot overflow readline."""
+    pending = b''
+    while True:
+        block = await reader.read(4096)
+        if not block:
+            if pending: yield pending
+            return
+        lines = (pending + block).replace(b'\r', b'\n').split(b'\n')
+        pending = lines.pop()[-2048:]
+        for line in lines:
+            if line: yield line[:2048]
 
 
 def settings_path():
@@ -155,6 +176,7 @@ class VideoReceiver:
         self.observers = set()
         self.signature = None
         self.firewall_task = None
+        self.diagnostics = {'starts': 0, 'lastStopReason': '', 'warningCount': 0, 'lastWarning': ''}
 
     @property
     def active(self):
@@ -171,7 +193,8 @@ class VideoReceiver:
                   'listenerReady': self.listener_ready and self.active,
                   'runtimeReady': bool(self.runtime.executable),
                   'generation': self.generation, 'media': self.info, 'suspended': self.suspended,
-                  'warning': self.load_error, 'playbackError': self.playback_error}
+                  'warning': self.load_error, 'playbackError': self.playback_error,
+                  'receiverDiagnostics': {**self.diagnostics, 'srtReceiveLatencyMs': max(SRT_RECEIVE_LATENCY_MS, self.profile()['latency'])}}
         if private: result.update(config=copy.deepcopy(c), token=self.token, windows=os.name == 'nt', receiverExecutable=self.runtime.executable or '')
         return result
 
@@ -237,14 +260,19 @@ class VideoReceiver:
         for session in tuple(self.media): session.changed.set()
 
     def publish_audio(self, data):
+        self.last_packet = time.monotonic()  # Live audio is media activity too.
         for session in tuple(self.media): session.push_audio(data)
 
     def command(self, executable):
         p = self.profile()
-        # A 120 ms deadline discards recoverable packets on longer WAN paths.
-        # The receiver negotiates this floor; larger saved values still apply.
+        # Recovery happens before decoding. The browser's PCM cushion cannot
+        # restore MPEG-TS packets discarded by an undersized network deadline.
+        # Keep explicit, fixed byte limits; honor larger saved latency values.
         query = urlencode({'mode':'listener','passphrase':p['passphrase'],'pbkeylen':32,
-                           'enforced_encryption':1,'latency':max(750,p['latency'])*1000,'timeout':5000000,'tlpktdrop':1})
+                           'enforced_encryption':1,'latency':max(SRT_RECEIVE_LATENCY_MS,p['latency'])*1000,
+                           'rcvbuf':SRT_RECEIVE_BYTES,'recv_buffer_size':SRT_UDP_RECEIVE_BYTES,
+                           # FFmpeg passes ffs directly to SRTO_FC (packet count).
+                           'ffs':32768,'timeout':SRT_IO_TIMEOUT_US,'tlpktdrop':1,'nakreport':1})
         scale = ('scale=1280:720:force_original_aspect_ratio=decrease:force_divisible_by=2'
                  ':flags=fast_bilinear:out_color_matrix=bt709:out_range=tv,'
                  'pad=1280:720:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=60:start_time=0,format=yuv420p')
@@ -313,6 +341,7 @@ class VideoReceiver:
                 self.reset_media(); self.status_to('starting', f"Opening UDP port {self.profile()['port']}…")
                 job = None; tasks = []
                 try:
+                    self.diagnostics['starts'] += 1
                     self.process = await asyncio.create_subprocess_exec(*self.command(executable),
                         stdin=subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
                         limit=65536, creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
@@ -336,12 +365,10 @@ class VideoReceiver:
                     async def stalled():
                         while True:
                             await asyncio.sleep(2)
-                            if self.last_packet and time.monotonic()-self.last_packet > 10: return
+                            if self.last_packet and time.monotonic()-self.last_packet > MEDIA_STALL_SECONDS: return
                     async def errors():
-                        while True:
-                            line = await self.process.stderr.readline()
-                            if not line: return
-                            text = line.decode('utf-8', errors='replace')[:2048]
+                        async for line in receiver_log_lines(self.process.stderr):
+                            text = line.decode('utf-8', errors='replace')
                             # Never expose the complete input URL in diagnostics.
                             if 'Video:' in text:
                                 codec = re.search(r'Video:\s*([\w]+)', text)
@@ -355,6 +382,10 @@ class VideoReceiver:
                                 codec = re.search(r'Audio:\s*([\w]+)', text)
                                 if codec: self.info['audioCodec'] = codec.group(1); self.changed()
                             lower = text.lower()
+                            if any(word in lower for word in ('error', 'corrupt', 'invalid', 'missed', 'dropp', 'overrun', 'no room')):
+                                safe = re.sub(r'srt://\S+', 'srt://[redacted]', text).replace(self.profile()['passphrase'], '[redacted]')
+                                self.diagnostics['warningCount'] += 1
+                                self.diagnostics['lastWarning'] = safe.strip()[:240]
                             if 'address already in use' in lower or 'bind' in lower and 'fail' in lower:
                                 self.status_to('error', 'UDP port is busy. Release the old OBS SRT Media Source.')
                             elif 'protocol not found' in lower or 'unknown protocol' in lower:
@@ -367,10 +398,20 @@ class VideoReceiver:
                     done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
                     for finished in done:
                         if not finished.cancelled() and finished.exception(): raise finished.exception()
+                    if not self.wake.is_set() and not self.closed:
+                        reason = 'decoder exit ' + str(self.process.returncode) if self.process.returncode is not None else (
+                            'no decoded audio or video for 30 seconds' if tasks[5] in done else
+                            'decoder output ended' if tasks[0] in done else
+                            'decoder log ended' if tasks[1] in done else 'listener stopped')
+                        self.diagnostics['lastStopReason'] = reason
+                        LOG.warning('SRT receiver stopped: %s', reason)
                     if self.last_packet: retry = 1
                 except asyncio.CancelledError:
                     raise
-                except Exception:
+                except Exception as error:
+                    detail = re.sub(r'srt://\S+', 'srt://[redacted]', str(error)).replace(self.profile()['passphrase'], '[redacted]')
+                    self.diagnostics['lastStopReason'] = (type(error).__name__ + ': ' + detail)[:240]
+                    LOG.warning('SRT receiver stopped: %s', self.diagnostics['lastStopReason'])
                     self.status_to('error', 'The SRT receiver could not start or the stream stopped. Check FFmpeg, firewall, and sender settings.')
                 finally:
                     self.listener_ready = False
