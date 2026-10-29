@@ -251,11 +251,10 @@ class VideoReceiver:
                 '-fflags', '+discardcorrupt', '-hwaccel', 'none', '-threads', '4',
                 '-f', 'mpegts', '-i', f"srt://{p['bind']}:{p['port']}?{query}",
                 '-map', '0:v:0', '-map', '0:a:0?', '-vf', scale,
-                '-c:v', 'libx264', '-threads:v', '2', '-preset', 'ultrafast', '-tune', 'zerolatency',
-                '-profile:v', 'baseline', '-level:v', '3.2', '-pix_fmt', 'yuv420p',
+                # The backend already decoded/scaled these pixels. Send them over
+                # loopback directly: no intermediate encoder or browser GPU decoder.
+                '-c:v', 'rawvideo', '-threads:v', '1', '-pix_fmt', 'yuv420p', '-vtag', 'I420',
                 '-colorspace', 'bt709', '-color_primaries', 'bt709', '-color_trc', 'bt709', '-color_range', 'tv',
-                '-g', '1', '-bf', '0', '-refs', '1', '-crf', '18', '-maxrate', '12000k', '-bufsize', '12000k',
-                '-x264-params', 'keyint=1:min-keyint=1:scenecut=0:repeat-headers=1:aud=1', '-vtag', 'H264',
                 '-c:a', 'pcm_s16le', '-ac', '2', '-ar', '48000',
                 '-af', 'aresample=async=1:first_pts=0',
                 '-f', 'avi', '-flush_packets', '1', 'pipe:1']
@@ -348,7 +347,7 @@ class VideoReceiver:
                                 if codec and 'sourceWidth' not in self.info:
                                     self.info['videoCodec'] = codec.group(1)
                                     if size: self.info.update(sourceWidth=int(size.group(1)), sourceHeight=int(size.group(2)))
-                                self.info.update(width=WIDTH, height=HEIGHT, fps=FPS, transport='bounded-h264-pcm16')
+                                self.info.update(width=WIDTH, height=HEIGHT, fps=FPS, transport='bounded-i420-pcm16')
                                 self.changed()
                             elif 'Audio:' in text:
                                 codec = re.search(r'Audio:\s*([\w]+)', text)

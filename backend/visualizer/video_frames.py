@@ -1,4 +1,4 @@
-"""Bounded independent H.264 frames and PCM; explicit client frame credit."""
+"""Bounded 720p I420 pixels and PCM; explicit client frame credit."""
 import asyncio
 from collections import deque
 import struct
@@ -6,16 +6,16 @@ import time
 
 WIDTH, HEIGHT, FPS = 1280, 720, 60
 FRAME_BYTES = WIDTH * HEIGHT * 3 // 2
-MAX_FRAME_BYTES = 2 * 1024 * 1024
+MAX_FRAME_BYTES = FRAME_BYTES
 HEADER = struct.Struct('<4sB3xIQ')
 VIDEO, AUDIO = 1, 2
 VIDEO_DELAY = .250  # Match the audio worklet's small jitter buffer.
-FRAME_HISTORY = 32  # Fixed encoded-picture history in system RAM; never GPU surfaces.
+FRAME_HISTORY = 32  # Fixed CPU pixel history in system RAM; never GPU surfaces.
 AUDIO_QUEUE = 16
 
 
 def packet(kind, sequence, stamp, data):
-    return HEADER.pack(b'FUV2', kind, sequence & 0xffffffff, stamp) + data
+    return HEADER.pack(b'FUV3', kind, sequence & 0xffffffff, stamp) + data
 
 
 class MediaSession:
@@ -65,7 +65,7 @@ class FrameStore:
 
 
 async def read_avi(reader, on_video, on_audio):
-    """Read our fixed intra-H.264/PCM AVI pipe; no external AVI input parser."""
+    """Read our fixed I420/PCM AVI pipe; no external AVI input parser."""
     header = await reader.readexactly(12)
     if header[:4] != b'RIFF' or header[8:] != b'AVI ': raise ValueError('Invalid decoder pipe header')
     video_sequence = audio_sequence = audio_samples = 0
@@ -85,7 +85,7 @@ async def read_avi(reader, on_video, on_audio):
         if in_media and tag in (b'00dc', b'00db'):
             video_sequence += 1
             if length == 0: continue  # AVI may mark a duplicated slot with an empty chunk.
-            if not 4 <= length <= MAX_FRAME_BYTES: raise ValueError('Video frame exceeded its transport bound')
+            if length != FRAME_BYTES: raise ValueError('Video frame exceeded its transport bound')
             data = await reader.readexactly(length)
             on_video(video_sequence, packet(VIDEO, video_sequence, video_sequence*1000000//FPS, data))
         elif in_media and tag == b'01wb':

@@ -1,4 +1,4 @@
-/* A bounded 720p GPU decoder, drawn under the existing scene GPU fence. */
+/* Bounded backend-decoded 720p pixels, drawn under the existing scene GPU fence. */
 (() => {
   'use strict';
   const port=Number(new URLSearchParams(location.search).get('port')||location.port||8766);
@@ -133,7 +133,7 @@
     if(window.FuraticOBSCreateVideoRenderer)return Promise.resolve(window.FuraticOBSCreateVideoRenderer);
     if(library)return library;
     library=new Promise((resolve,reject)=>{
-      const script=libraryScript=document.createElement('script');script.src=origin+'/obs-video-renderer.js?v=3';
+      const script=libraryScript=document.createElement('script');script.src=origin+'/obs-video-renderer.js?v=4';
       script.onload=()=>{script.onload=script.onerror=null;window.FuraticOBSCreateVideoRenderer?resolve(window.FuraticOBSCreateVideoRenderer):reject(new Error('Player unavailable'));};
       script.onerror=()=>{script.onload=script.onerror=null;script.remove();libraryScript=null;library=null;reject(new Error('Player unavailable'));};
       document.head.appendChild(script);

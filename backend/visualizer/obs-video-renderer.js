@@ -24,6 +24,13 @@
       rgb=clamp(vec3(y+1.5748*v,y-.187324*u-.468124*v,y+1.8556*u),0.,1.);}
       color=vec4(mix(rgb,vec3(1.),border*.188)*cover/max(alpha,.0001),u_alpha*alpha);}`;
     function ack(message){if(worker&&!dead&&message?.buffer){worker.postMessage({type:'ack',sequence:message.sequence,buffer:message.buffer},[message.buffer]);credited++;}if(message)message.buffer=null;}
+    function discard(message,recipient=worker){
+      const buffer=message?.buffer;if(!buffer)return;message.buffer=null;
+      // Retired ArrayBuffers otherwise wait for main-thread garbage collection.
+      // Detach their backing store now; older CEF can hand it to the retiring worker.
+      if(typeof buffer.transfer==='function')buffer.transfer(0);
+      else if(recipient)try{recipient.postMessage({type:'release',buffer},[buffer]);}catch(_){}
+    }
     function destroy(old,valid=true){
       if(old&&valid){const gl=old.gl;for(let i=0;i<3;i++){gl.activeTexture(gl.TEXTURE0+i);gl.bindTexture(gl.TEXTURE_2D,null);}gl.activeTexture(gl.TEXTURE0);gl.bindVertexArray(null);gl.useProgram(null);
         for(const texture of old.textures)gl.deleteTexture(texture);gl.deleteVertexArray(old.vao);gl.deleteProgram(old.program);gl.flush();}
@@ -32,7 +39,7 @@
     function retireGraphics(){
       const old=graphics;graphics=null;if(!old)return Promise.resolve();
       const gl=old.gl;if(gl.isContextLost())return Promise.resolve();
-      // Retire the last pixel upload before another decoder/texture is created.
+      // Retire the last pixel upload before another texture is created.
       // This runs only at shutdown, never blocks the render or audio threads.
       const fence=gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE,0);gl.flush();
       return new Promise(resolve=>{
@@ -77,12 +84,12 @@
         gain=context.createGain();node.connect(gain);gain.connect(context.destination);api.audio(options.volume,options.muted);
         channel=new MessageChannel();node.port.postMessage({type:'port',port:channel.port1},[channel.port1]);
         // A small classic-worker wrapper also supports an OBS local-file page.
-        workerURL=URL.createObjectURL(new Blob(['importScripts('+JSON.stringify(options.origin+'/obs-video-transport.js?v=2')+');'],{type:'text/javascript'}));
+        workerURL=URL.createObjectURL(new Blob(['importScripts('+JSON.stringify(options.origin+'/obs-video-transport.js?v=3')+');'],{type:'text/javascript'}));
         worker=new Worker(workerURL);worker.onmessage=event=>{
-          const message=event.data;if(dead){message.buffer=null;return;}
+          const message=event.data;if(dead){discard(message);return;}
           if(message.type==='pixels'){
             const bytes=message.pixelFormat==='I420'?1280*720*3/2:message.pixelFormat==='RGBA'?1280*720*4:0;
-            if(!bytes||!(message.buffer instanceof ArrayBuffer)||message.buffer.byteLength!==bytes){options.onError('Invalid 720p pixel buffer',true);return;}
+            if(!bytes||!(message.buffer instanceof ArrayBuffer)||message.buffer.byteLength!==bytes){discard(message);options.onError('Invalid 720p pixel buffer',true);return;}
             if(graphicsUnavailable){deferredCredits.push(message);return;}
             if(pending&&ahead){ack(message);options.onError('Video exceeded its frame credit');return;}
             if(pending)ahead=message;else pending=message;received++;lastSequence=message.sequence;
@@ -98,13 +105,15 @@
       draw(gl,w,h,rect,crop,alpha){
         if(graphicsUnavailable){graphicsUnavailable=false;for(const message of deferredCredits)ack(message);deferredCredits.length=0;}
         if(submitted!==null)return;
-        if(ahead){ack(pending);pending=ahead;ahead=null;} // The enclosing scene fence owns this GPU submission.
+        // Two fresh arrivals can straddle one display tick. Present both in order;
+        // only collapse them after a stall, never build a catch-up frame queue.
+        if(ahead&&Date.now()-pending.arrivedAt>50){ack(pending);pending=ahead;ahead=null;}
         if(pending&&Date.now()-pending.arrivedAt>300){ack(pending);pending=null;}
         if(dead||(!pending&&!graphics?.ready))return;
         if(graphics?.gl!==gl)free();if(!graphics)make(gl,pending.pixelFormat);
         if(pending&&pending.pixelFormat!==graphics.pixelFormat)throw new Error('Video pixel format changed');
         const r=graphics;gl.useProgram(r.program);gl.bindVertexArray(r.vao);gl.pixelStorei(gl.UNPACK_ALIGNMENT,1);
-        const frame=pending;pending=null;
+        const frame=pending;pending=ahead;ahead=null;
         try{
           const data=frame?new Uint8Array(frame.buffer):null,y=1280*720,uv=y/4;
           for(let i=0;i<3;i++){
@@ -127,13 +136,13 @@
         pending=ahead=null;free(valid);api.complete();
       },
       close(){
-        if(closing)return closing;dead=true;pending=ahead=null;submitted=null;deferredCredits.length=0;
+        if(closing)return closing;dead=true;for(const message of [pending,ahead,...deferredCredits])discard(message);pending=ahead=null;submitted=null;deferredCredits.length=0;
         const releases=[retireGraphics()];
         if(worker){
           const old=worker;worker=null;let deadline=0;
           releases.push(new Promise(resolve=>{
             const terminate=()=>{clearTimeout(deadline);old.onmessage=old.onerror=null;old.terminate();resolve();};
-            old.onmessage=e=>{e.data.buffer=null;if(e.data.type==='stopped')terminate();};old.onerror=terminate;
+            old.onmessage=e=>{discard(e.data,old);if(e.data.type==='stopped')terminate();};old.onerror=terminate;
             old.postMessage({type:'stop'});deadline=setTimeout(terminate,1000);
           }));
         }
