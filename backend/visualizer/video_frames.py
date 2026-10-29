@@ -1,5 +1,7 @@
 """Bounded 720p I420 pixels and PCM; explicit client frame credit."""
 import asyncio
+import math
+import secrets
 from collections import deque
 import struct
 import time
@@ -9,9 +11,9 @@ FRAME_BYTES = WIDTH * HEIGHT * 3 // 2
 MAX_FRAME_BYTES = FRAME_BYTES
 HEADER = struct.Struct('<4sB3xIQ')
 VIDEO, AUDIO = 1, 2
-VIDEO_DELAY = .750  # Match the audio worklet's 750 ms playback cushion.
-FRAME_HISTORY = 64  # Fixed CPU history for A/V alignment; no extra GPU surfaces.
-AUDIO_QUEUE = 96  # Bounded PCM burst allowance, matching the worker's packet cap.
+VIDEO_DELAY = 1.250  # Fallback only for a source with no audio.
+FRAME_HISTORY = 128  # Fixed CPU history for A/V alignment; no extra GPU surfaces.
+AUDIO_QUEUE = 192  # Bounded PCM burst allowance, matching the worker's packet cap.
 
 
 def packet(kind, sequence, stamp, data):
@@ -26,12 +28,35 @@ class MediaSession:
         self.inflight = None
         self.last_sent = -1
         self.closed = False
+        self.id = secrets.token_urlsafe(18)
+        self.audio_connected = False
+        self.has_audio = False
+        self.clock_sample = None
+        self.clock_at = 0.
+        self.clock_rate = 1.
+        self.clock_playing = False
 
     def acknowledge(self, sequence):
         if type(sequence) is int and sequence == self.inflight:
             self.inflight = None; self.credit.set()
 
+    def update_clock(self, value):
+        if not isinstance(value, dict) or set(value) != {'sample', 'rate', 'playing'}: return False
+        sample, rate = value['sample'], value['rate']
+        if type(sample) not in (int, float) or not math.isfinite(sample) or not 0 <= sample < 2**53: return False
+        if type(rate) not in (int, float) or not .99 <= rate <= 1.01 or type(value['playing']) is not bool: return False
+        self.clock_sample, self.clock_rate, self.clock_playing = sample, rate, value['playing']
+        self.clock_at = time.monotonic(); self.changed.set()
+        return True
+
+    def position(self):
+        if self.clock_sample is None: return None
+        # A stopped worklet never advances the picture beyond its last sound.
+        elapsed = max(0., min(.150, time.monotonic()-self.clock_at)) if self.clock_playing else 0.
+        return self.clock_sample + elapsed*48000*self.clock_rate
+
     def push_audio(self, data):
+        self.has_audio = True
         if self.audio.full(): self.audio.get_nowait()
         self.audio.put_nowait(data)
 
@@ -55,12 +80,13 @@ class FrameStore:
         self.epoch = offset if self.epoch is None else min(self.epoch, offset)
         self.frames.append((now, sequence, data))
 
-    def select(self, after):
+    def select(self, after, sample=None):
         deadline = time.monotonic()-VIDEO_DELAY
         for received, sequence, data in reversed(self.frames):
             # FFmpeg may write several independent frames in one pipe burst. Their
             # frame times, rather than identical arrival times, pace delivery.
-            if self.epoch+sequence/FPS <= deadline and sequence > after: return sequence, data
+            due = (sequence-1)*48000/FPS <= sample + .0001 if sample is not None else self.epoch+sequence/FPS <= deadline
+            if due and sequence > after: return sequence, data
         return None
 
 

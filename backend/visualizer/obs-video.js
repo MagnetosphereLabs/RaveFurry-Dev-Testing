@@ -133,7 +133,7 @@
     if(window.FuraticOBSCreateVideoRenderer)return Promise.resolve(window.FuraticOBSCreateVideoRenderer);
     if(library)return library;
     library=new Promise((resolve,reject)=>{
-      const script=libraryScript=document.createElement('script');script.src=origin+'/obs-video-renderer.js?v=6';
+      const script=libraryScript=document.createElement('script');script.src=origin+'/obs-video-renderer.js?v=7';
       script.onload=()=>{script.onload=script.onerror=null;window.FuraticOBSCreateVideoRenderer?resolve(window.FuraticOBSCreateVideoRenderer):reject(new Error('Player unavailable'));};
       script.onerror=()=>{script.onload=script.onerror=null;script.remove();libraryScript=null;library=null;reject(new Error('Player unavailable'));};
       document.head.appendChild(script);

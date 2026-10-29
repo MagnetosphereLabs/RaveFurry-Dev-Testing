@@ -246,7 +246,7 @@ class VideoReceiver:
         scale = ('scale=1280:720:force_original_aspect_ratio=decrease:force_divisible_by=2'
                  ':flags=fast_bilinear:out_color_matrix=bt709:out_range=tv,'
                  'pad=1280:720:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=60:start_time=0,format=yuv420p')
-        return [executable, '-hide_banner', '-nostdin', '-loglevel', 'info',
+        return [executable, '-hide_banner', '-nostdin', '-nostats', '-loglevel', 'info',
                 '-filter_threads', '1', '-analyzeduration', '1000000', '-probesize', '1048576',
                 '-fflags', '+discardcorrupt', '-hwaccel', 'none', '-threads', '4',
                 '-f', 'mpegts', '-i', f"srt://{p['bind']}:{p['port']}?{query}",
@@ -463,44 +463,70 @@ def install_routes(app, receiver, port):
 
     async def media(request):
         if not receiver.active: raise web.HTTPConflict(text='Select Video layout and enable the receiver')
+        if request.query.get('track') == 'audio':
+            session = next((s for s in receiver.media if secrets.compare_digest(s.id, request.query.get('session', ''))), None)
+            if session is None or session.closed or session.audio_connected:
+                raise web.HTTPConflict(text='No available video session')
+            session.audio_connected = True
+            ws = web.WebSocketResponse(heartbeat=15, max_msg_size=1024, compress=False)
+            sockets.add(ws); sender = None
+            try:
+                await ws.prepare(request)
+                # Separate, bounded PCM track: raw pixel backpressure cannot
+                # starve sound or force a reconnect during a busy music frame.
+                async def pcm():
+                    try:
+                        while not session.closed and not ws.closed:
+                            data = await session.audio.get()
+                            if data is None: break
+                            await ws.send_bytes(data)
+                    except (ConnectionError, asyncio.TimeoutError, RuntimeError): pass
+                    finally: await ws.close()
+                sender = asyncio.create_task(pcm())
+                async for message in ws:
+                    if message.type in (WSMsgType.TEXT, WSMsgType.BINARY): break
+            finally:
+                if sender:
+                    sender.cancel(); await asyncio.gather(sender, return_exceptions=True)
+                session.close(); session.audio_connected = False
+                sockets.discard(ws); await ws.close()
+            return ws
         if receiver.media: raise web.HTTPServiceUnavailable(text='The live video is already playing in another display')
         ws = web.WebSocketResponse(heartbeat=15, max_msg_size=1024, compress=False)
         session = MediaSession(); receiver.media.add(session); sockets.add(ws)
         tasks = []
         try:
             await ws.prepare(request)
+            await ws.send_json({'type':'session', 'id':session.id})
             async def pictures():
                 try:
                     while not session.closed and not ws.closed:
                         await session.credit.wait()
                         if session.closed: break
                         session.changed.clear()
-                        frame = receiver.frames.select(session.last_sent)
+                        if session.has_audio and session.clock_sample is None:
+                            frame = None
+                        else: frame = receiver.frames.select(session.last_sent, session.position() if session.has_audio else None)
                         if frame is None:
                             try: await asyncio.wait_for(session.changed.wait(), .010)
                             except asyncio.TimeoutError: pass
                             continue
                         sequence, data = frame
                         session.inflight = sequence & 0xffffffff; session.last_sent = sequence; session.credit.clear()
-                        await asyncio.wait_for(ws.send_bytes(data), 1)
+                        await ws.send_bytes(data)
                         data = frame = None  # Never retain an old frame while waiting for GPU credit.
                 except (ConnectionError, asyncio.TimeoutError, RuntimeError): pass
                 finally: await ws.close()
-            async def audio():
-                try:
-                    while not session.closed and not ws.closed:
-                        data = await session.audio.get()
-                        if data is None: break
-                        await asyncio.wait_for(ws.send_bytes(data), .5)
-                except (ConnectionError, asyncio.TimeoutError, RuntimeError): pass
-                finally: await ws.close()
-            tasks = [asyncio.create_task(pictures()), asyncio.create_task(audio())]
+            tasks = [asyncio.create_task(pictures())]
             async for message in ws:
                 if message.type != WSMsgType.TEXT: break
                 try:
                     value = json.loads(message.data)
-                    if not isinstance(value, dict) or set(value) != {'ack'}: break
-                    session.acknowledge(value['ack'])
+                    if not isinstance(value, dict): break
+                    if set(value) == {'ack'}: session.acknowledge(value['ack'])
+                    elif set(value) == {'clock'}:
+                        if not session.update_clock(value['clock']): break
+                    else: break
                 except (ValueError, TypeError): break
         finally:
             session.close()

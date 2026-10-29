@@ -3,7 +3,7 @@
   'use strict';
   window.FuraticOBSCreateVideoRenderer=function(options){
     let dead=false,worker=null,context=null,node=null,gain=null,channel=null,workerURL=null,closing=null;
-    let pending=null,ahead=null,submitted=null,graphics=null,first=true,received=0,drawn=0,credited=0,lastSequence=0,audioStatus=null,graphicsUnavailable=false;
+    let pending=null,ahead=null,submitted=null,graphics=null,first=true,received=0,drawn=0,credited=0,lastSequence=0,audioStatus=null,graphicsUnavailable=false,lastOutputCheck=0,outputDelay=.1,lastPresentedSequence=0;
     const deferredCredits=[];
     const vertex=`#version 300 es
       precision highp float;uniform vec2 u_resolution;uniform vec4 u_rect;out vec2 uv;
@@ -78,13 +78,13 @@
       async start(){
         const Audio=window.AudioContext||window.webkitAudioContext;
         if(!Audio)throw new Error('This OBS browser lacks Web Audio support');
-        context=new Audio({sampleRate:48000,latencyHint:'interactive'});
-        await context.audioWorklet.addModule(options.origin+'/obs-video-audio.js?v=3');if(dead)return;
+        context=new Audio({sampleRate:48000,latencyHint:'playback'});
+        await context.audioWorklet.addModule(options.origin+'/obs-video-audio.js?v=4');if(dead)return;
         node=new AudioWorkletNode(context,'furatic-pcm',{numberOfInputs:0,numberOfOutputs:1,outputChannelCount:[2]});
         gain=context.createGain();node.connect(gain);gain.connect(context.destination);api.audio(options.volume,options.muted);
         channel=new MessageChannel();node.port.postMessage({type:'port',port:channel.port1},[channel.port1]);
         // A small classic-worker wrapper also supports an OBS local-file page.
-        workerURL=URL.createObjectURL(new Blob(['importScripts('+JSON.stringify(options.origin+'/obs-video-transport.js?v=5')+');'],{type:'text/javascript'}));
+        workerURL=URL.createObjectURL(new Blob(['importScripts('+JSON.stringify(options.origin+'/obs-video-transport.js?v=6')+');'],{type:'text/javascript'}));
         worker=new Worker(workerURL);worker.onmessage=event=>{
           const message=event.data;if(dead){discard(message);return;}
           if(message.type==='pixels'){
@@ -103,6 +103,11 @@
       resume(){if(!dead)context?.resume().catch(()=>{});},
       audio(volume,muted){if(gain){const value=muted?0:volume;if(gain.gain.value!==value)gain.gain.value=value;}},
       draw(gl,w,h,rect,crop,alpha){
+        if(context&&worker&&performance.now()-lastOutputCheck>500){
+          lastOutputCheck=performance.now();const stamp=context.getOutputTimestamp?.();
+          const seconds=stamp?.performanceTime>0?context.currentTime-(stamp.contextTime+(performance.now()-stamp.performanceTime)/1000):(context.baseLatency||0)+(context.outputLatency||0);
+          outputDelay=Math.max(0,Math.min(.5,seconds));worker.postMessage({type:'output-delay',seconds:outputDelay});
+        }
         if(graphicsUnavailable){graphicsUnavailable=false;for(const message of deferredCredits)ack(message);deferredCredits.length=0;}
         if(submitted!==null)return;
         // Two fresh arrivals can straddle one display tick. Present both in order;
@@ -124,7 +129,7 @@
             }
           }
           gl.uniform1i(r.planar,r.pixelFormat==='I420'?1:0);
-          if(frame){submitted=frame.sequence;r.ready=true;drawn++;if(first){first=false;options.onFrame();}}
+          if(frame){submitted=frame.sequence;lastPresentedSequence=frame.sequence;r.ready=true;drawn++;if(first){first=false;options.onFrame();}}
           gl.uniform2f(r.resolution,w,h);gl.uniform4fv(r.rect,rect);gl.uniform4fv(r.crop,crop);gl.uniform2f(r.size,rect[2],rect[3]);gl.uniform1f(r.alpha,alpha);
           gl.enable(gl.BLEND);gl.blendFunc(gl.SRC_ALPHA,gl.ONE_MINUS_SRC_ALPHA);gl.drawArrays(gl.TRIANGLE_STRIP,0,4);
         }finally{ack(frame);gl.disable(gl.BLEND);gl.bindVertexArray(null);for(let i=0;i<3;i++){gl.activeTexture(gl.TEXTURE0+i);gl.bindTexture(gl.TEXTURE_2D,null);}gl.activeTexture(gl.TEXTURE0);gl.useProgram(null);}
@@ -152,7 +157,7 @@
         if(context){releases.push(context.close().catch(()=>{}));context=null;}
         closing=Promise.all(releases).then(()=>{});return closing;
       },
-      get stats(){return {received,drawn,credited,lastSequence,pending:(pending?1:0)+(ahead?1:0),inflight:submitted===null?0:1,textures:graphics?3:0,textureBytes:graphics?(graphics.pixelFormat==='I420'?1382400:3686402):0,audioState:context?.state||'closed',audio:audioStatus};}
+      get stats(){return {received,drawn,credited,lastSequence,lastPresentedSequence,audioOutputDelay:outputDelay,pending:(pending?1:0)+(ahead?1:0),inflight:submitted===null?0:1,textures:graphics?3:0,textureBytes:graphics?(graphics.pixelFormat==='I420'?1382400:3686402):0,audioState:context?.state||'closed',audio:audioStatus};}
     };
     return api;
   };
