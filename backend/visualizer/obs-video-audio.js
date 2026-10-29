@@ -1,7 +1,7 @@
 /* A fixed PCM ring on the audio thread; no decoder and no main-thread scheduling. */
 class FuraticPCM extends AudioWorkletProcessor {
   constructor(){
-    super();this.capacity=192000;this.target=144000;this.left=new Float32Array(this.capacity);this.right=new Float32Array(this.capacity);
+    super();this.capacity=192000;this.target=72000;this.left=new Float32Array(this.capacity);this.right=new Float32Array(this.capacity);
     this.read=0;this.write=0;this.count=0;this.started=false;this.expected=-1;this.audioPort=null;this.dead=false;this.played=0;this.underruns=0;
     this.fraction=0;this.average=this.target;this.rate=1;this.discarded=0;this.discontinuities=0;
     this.reportFrames=0;this.primingDiscarded=0;this.recoveries=0;
@@ -37,7 +37,7 @@ class FuraticPCM extends AudioWorkletProcessor {
     // Source sample numbers are the common A/V timeline. Missing PCM must not
     // compress that timeline and permanently move sound ahead of the picture.
     let missing=Math.max(0,gap);
-    if(missing>this.target){this.count=0;this.read=this.write;this.started=false;this.fraction=0;this.average=this.target;this.rate=1;this.discontinuities++;missing=0;}
+    if(missing>144000){this.count=0;this.read=this.write;this.started=false;this.fraction=0;this.average=this.target;this.rate=1;this.discontinuities++;missing=0;}
     const bridge=missing>0;
     const excess=Math.max(0,this.count+missing+frames-this.capacity);
     if(excess){
@@ -71,8 +71,9 @@ class FuraticPCM extends AudioWorkletProcessor {
     if(this.dead)return false;
     const out=outputs[0];if(!out?.length)return true;
     const left=out[0],right=out[1]||left;
-    // Three seconds absorb temporary delivery stalls without a silence/refill
-    // cycle. Capacity remains fixed at four seconds.
+    // Network retransmission has its own SRT budget. Prime 1.5 seconds here
+    // for local scheduling jitter; capacity stays fixed at four seconds for
+    // bursts. Keep the separate three-second discontinuity threshold above.
     // Prime once from ordered PCM. Video follows this actual read position;
     // no wall-clock trimming or guessed independent video delay is needed.
     if(!this.started&&this.count>=this.target){this.started=true;this.average=this.count;this.rate=1;}
@@ -107,3 +108,4 @@ class FuraticPCM extends AudioWorkletProcessor {
   }
 }
 registerProcessor('furatic-pcm',FuraticPCM);
+

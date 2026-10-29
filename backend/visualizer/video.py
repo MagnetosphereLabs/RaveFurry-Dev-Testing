@@ -22,11 +22,11 @@ from urllib.parse import urlencode
 from aiohttp import web, WSMsgType
 
 from .srt_runtime import SRTRuntime, RuntimeSetupError, owns_udp_port
-from .video_frames import FrameStore, MediaSession, read_avi, WIDTH, HEIGHT, FPS
+from .video_frames import DecoderPipe, FrameStore, MediaSession, WIDTH, HEIGHT, FPS
 
 HERE = Path(__file__).parent
 MAX_QUEUE = 8  # Compatibility for diagnostics; media uses explicit frame credits.
-SRT_RECEIVE_LATENCY_MS = 4000
+SRT_RECEIVE_LATENCY_MS = 1500
 SRT_RECEIVE_BYTES = 16 * 1024 * 1024
 SRT_UDP_RECEIVE_BYTES = 4 * 1024 * 1024
 SRT_IO_TIMEOUT_US = 20_000_000
@@ -169,6 +169,7 @@ class VideoReceiver:
         self.presentation_timer = None
         self.closed = False
         self.process = None
+        self.decoder_pipe = None
         self.task = None
         self.wake = asyncio.Event()
         self.media = set()
@@ -254,8 +255,11 @@ class VideoReceiver:
         self.media.clear(); self.changed()
 
     def publish_video(self, sequence, data):
-        self.last_packet = time.monotonic()
         self.frames.publish(sequence, data)
+        self.video_ready()
+
+    def video_ready(self):
+        self.last_packet = time.monotonic()
         if self.status != 'receiving': self.status_to('receiving', 'Receiving live video · bounded 720p / 60 FPS')
         for session in tuple(self.media): session.changed.set()
 
@@ -267,6 +271,7 @@ class VideoReceiver:
         p = self.profile()
         # Recovery happens before decoding. The browser's PCM cushion cannot
         # restore MPEG-TS packets discarded by an undersized network deadline.
+        # Budget network recovery separately from the 1.5 s local PCM cushion.
         # Keep explicit, fixed byte limits; honor larger saved latency values.
         query = urlencode({'mode':'listener','passphrase':p['passphrase'],'pbkeylen':32,
                            'enforced_encryption':1,'latency':max(SRT_RECEIVE_LATENCY_MS,p['latency'])*1000,
@@ -278,7 +283,12 @@ class VideoReceiver:
                  'pad=1280:720:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=60:start_time=0,format=yuv420p')
         return [executable, '-hide_banner', '-nostdin', '-nostats', '-loglevel', 'info',
                 '-filter_threads', '1', '-analyzeduration', '1000000', '-probesize', '1048576',
-                '-fflags', '+discardcorrupt', '-hwaccel', 'none', '-threads', '4',
+                # Native FFmpeg hardware decode on Windows, with its own bounded
+                # codec surface pool and software fallback for unsupported input.
+                # Default software output downloads each picture immediately;
+                # Chromium still receives I420, never decoder-owned GPU surfaces.
+                '-fflags', '+discardcorrupt', '-hwaccel', 'auto' if os.name == 'nt' else 'none',
+                '-extra_hw_frames', '0', '-threads', '4',
                 '-f', 'mpegts', '-i', f"srt://{p['bind']}:{p['port']}?{query}",
                 '-map', '0:v:0', '-map', '0:a:0?', '-vf', scale,
                 # The backend already decoded/scaled these pixels. Send them over
@@ -293,6 +303,8 @@ class VideoReceiver:
         self.task = asyncio.create_task(self.run()); self.presentation(self.presentation_until); self.reconcile()
 
     async def stop_process(self):
+        pipe, self.decoder_pipe = self.decoder_pipe, None
+        if pipe: pipe.request_stop()
         p = self.process
         if p and p.returncode is None:
             with contextlib.suppress(ProcessLookupError): p.terminate()
@@ -301,6 +313,7 @@ class VideoReceiver:
                 with contextlib.suppress(ProcessLookupError): p.kill()
                 await p.wait()
         self.process = None
+        if pipe: await pipe.close()
 
     async def close(self):
         self.closed = True; self.wake.set()
@@ -342,9 +355,22 @@ class VideoReceiver:
                 job = None; tasks = []
                 try:
                     self.diagnostics['starts'] += 1
-                    self.process = await asyncio.create_subprocess_exec(*self.command(executable),
-                        stdin=subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-                        limit=65536, creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
+                    # Windows' small overlapped pipe reads formerly made every
+                    # raw picture depend on repeated service-loop dispatches.
+                    # A blocking buffered reader drains the native pipe in its
+                    # own worker even while music/HTTP work is on that loop.
+                    read_fd, write_fd = os.pipe()
+                    stream = os.fdopen(read_fd, 'rb', buffering=256*1024)
+                    try:
+                        self.process = await asyncio.create_subprocess_exec(*self.command(executable),
+                            stdin=subprocess.DEVNULL, stdout=write_fd, stderr=asyncio.subprocess.PIPE,
+                            limit=65536, creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
+                        self.decoder_pipe = DecoderPipe(stream, self.frames, self.video_ready, self.publish_audio)
+                    except BaseException:
+                        stream.close()
+                        raise
+                    finally:
+                        os.close(write_fd)
                     job = WindowsJob(self.process.pid)
                     async def listening():
                         # A verified binary alone is insufficient: wait for this child's
@@ -361,7 +387,7 @@ class VideoReceiver:
                             await asyncio.sleep(.05)
                         self.status_to('error', f"Could not open UDP {self.profile()['port']}. Release the old OBS SRT Media Source and retry.")
                     async def output():
-                        await read_avi(self.process.stdout, self.publish_video, self.publish_audio)
+                        await self.decoder_pipe.run()
                     async def stalled():
                         while True:
                             await asyncio.sleep(2)
@@ -370,6 +396,15 @@ class VideoReceiver:
                         async for line in receiver_log_lines(self.process.stderr):
                             text = line.decode('utf-8', errors='replace')
                             # Never expose the complete input URL in diagnostics.
+                            device = re.search(r'Using auto hwaccel type ([\w]+)', text)
+                            if device:
+                                self.info['hardwareDevice'] = device.group(1)
+                                LOG.info('SRT receiver hardware device: %s', device.group(1))
+                                self.changed()
+                            elif 'Auto hwaccel disabled' in text:
+                                self.info['hardwareDevice'] = 'software fallback'
+                                LOG.info('SRT receiver: hardware unavailable; using software fallback')
+                                self.changed()
                             if 'Video:' in text:
                                 codec = re.search(r'Video:\s*([\w]+)', text)
                                 size = re.search(r'\b(\d{2,5})x(\d{2,5})\b', text)
@@ -635,3 +670,4 @@ def install_routes(app, receiver, port):
     app.router.add_get('/video/events', events)
     app.router.add_get('/video/live', media)
     app.on_startup.append(start); app.on_shutdown.append(stop)
+
