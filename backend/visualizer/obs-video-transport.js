@@ -1,5 +1,6 @@
 /* Networking stays off the UI thread. Video requires explicit renderer buffer credit. */
-let socket=null,audioPort=null,audioCredit=new Set(),latestAudio=null,stopped=false,audioReports=0;
+let socket=null,audioPort=null,audioCredit=new Set(),stopped=false,audioReports=0;
+const audioPending=[];let audioPendingFrames=0;
 const PIXEL_BYTES=1280*720*3/2;
 let buffers=[],displayOutstanding=new Set(),heldAck=null;
 function sendAck(sequence){if(socket?.readyState===1)socket.send(JSON.stringify({ack:sequence}));}
@@ -20,11 +21,23 @@ function picture(buffer,sequence){
 function fail(message,fatal=false){stop();self.postMessage({type:'error',message,fatal});}
 function audio(message){
   if(!audioPort)return;
-  if(audioCredit.size>=8){latestAudio=message;return;}
-  audioCredit.add(message.sequence);audioPort.postMessage(message,[message.buffer]);
+  // Audio is ordered, unlike disposable video frames. A scheduling burst must
+  // not replace the middle of a sentence with only its newest packet.
+  audioPending.push(message);audioPendingFrames+=(message.buffer.byteLength-20)/4;
+  while(audioPending.length>32||audioPendingFrames>32768){
+    const old=audioPending.shift();audioPendingFrames-=(old.buffer.byteLength-20)/4;
+    if(typeof old.buffer.transfer==='function')old.buffer.transfer(0);
+  }
+  drainAudio();
+}
+function drainAudio(){
+  while(audioPort&&audioCredit.size<8&&audioPending.length){
+    const message=audioPending.shift();audioPendingFrames-=(message.buffer.byteLength-20)/4;
+    audioCredit.add(message.sequence);audioPort.postMessage(message,[message.buffer]);
+  }
 }
 function stop(){
-  stopped=true;displayOutstanding.clear();buffers.length=0;heldAck=null;latestAudio=null;audioCredit.clear();if(audioPort){audioPort.onmessage=null;audioPort.close();audioPort=null;}
+  stopped=true;displayOutstanding.clear();buffers.length=0;heldAck=null;audioPending.length=0;audioPendingFrames=0;audioCredit.clear();if(audioPort){audioPort.onmessage=null;audioPort.close();audioPort=null;}
   if(socket){socket.onopen=socket.onmessage=socket.onerror=socket.onclose=null;socket.close();socket=null;}
 }
 self.onmessage=event=>{
@@ -34,7 +47,7 @@ self.onmessage=event=>{
     audioPort=message.port;audioPort.onmessage=e=>{
       if(e.data.type!=='accepted')return;audioCredit.delete(e.data.sequence);
       if(++audioReports%50===0)self.postMessage({type:'audio-status',value:e.data});
-      if(latestAudio){const value=latestAudio;latestAudio=null;audio(value);}
+      drainAudio();
     };audioPort.start();
   }else if(message.type==='connect'&&!socket&&!stopped){
     const ws=socket=new WebSocket(message.url);ws.binaryType='arraybuffer';

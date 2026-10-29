@@ -392,9 +392,17 @@
       const target = Math.max(0,Math.min(required,maximum));
       if (Math.abs((parseFloat(bar.style.getPropertyValue('--obs-notice-width'))||0)-target) > .5) bar.style.setProperty('--obs-notice-width',target+'px');
     }
+    // Place the artist immediately after a short title. When both labels are
+    // long, share the row instead of reserving empty title space or capping
+    // every artist at 42%, even when the remaining row is mostly empty.
+    const row = Math.max(0,song.clientWidth-gap(song));
+    const titleWidth = Math.min(width(noticeFields.title),Math.max(row*.6,row-width(noticeFields.artist)));
+    const basis = Math.max(0,Math.min(row,titleWidth));
+    if (Math.abs((parseFloat(song.style.getPropertyValue('--obs-notice-title-width'))||0)-basis) > .5)
+      song.style.setProperty('--obs-notice-title-width',basis+'px');
   }
   let videoLayout = false;
-  function layoutUnit() { return Math.min(innerWidth*.017,innerHeight*.03022226)*(videoLayout?.85:1); }
+  function layoutUnit() { return Math.min(innerWidth*.017,innerHeight*.03022226)*(videoLayout?.77:1); }
   function matchOriginalNoticeHeight() {
     // Measure a full original achievement card offscreen. This locks the bar
     // to its existing broadcast height, independent of reminder/song text.

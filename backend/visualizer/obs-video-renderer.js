@@ -79,12 +79,12 @@
         const Audio=window.AudioContext||window.webkitAudioContext;
         if(!Audio)throw new Error('This OBS browser lacks Web Audio support');
         context=new Audio({sampleRate:48000,latencyHint:'interactive'});
-        await context.audioWorklet.addModule(options.origin+'/obs-video-audio.js?v=1');if(dead)return;
+        await context.audioWorklet.addModule(options.origin+'/obs-video-audio.js?v=2');if(dead)return;
         node=new AudioWorkletNode(context,'furatic-pcm',{numberOfInputs:0,numberOfOutputs:1,outputChannelCount:[2]});
         gain=context.createGain();node.connect(gain);gain.connect(context.destination);api.audio(options.volume,options.muted);
         channel=new MessageChannel();node.port.postMessage({type:'port',port:channel.port1},[channel.port1]);
         // A small classic-worker wrapper also supports an OBS local-file page.
-        workerURL=URL.createObjectURL(new Blob(['importScripts('+JSON.stringify(options.origin+'/obs-video-transport.js?v=3')+');'],{type:'text/javascript'}));
+        workerURL=URL.createObjectURL(new Blob(['importScripts('+JSON.stringify(options.origin+'/obs-video-transport.js?v=4')+');'],{type:'text/javascript'}));
         worker=new Worker(workerURL);worker.onmessage=event=>{
           const message=event.data;if(dead){discard(message);return;}
           if(message.type==='pixels'){

@@ -34,7 +34,7 @@
     let resources=null,enabled=!window.FuraticOBSPresentation?.active,showing=Boolean(initialVisibility)&&!document.hidden,dead=false,alpha=enabled?1:0;
     const desired=new Float32Array(26),bands=new Float32Array(26),color=new Float32Array([1,1,1,0]),desiredColor=new Float32Array([1,1,1,0]);
     let targetScale=.7,scale=.7,received=-Infinity;
-    let videoLayout=window.FuraticOBSVideo?.layout==='video',barHeight=videoLayout?.75:1,logoAlpha=videoLayout?0:1;
+    let videoLayout=window.FuraticOBSVideo?.layout==='video',barHeight=videoLayout?.62:1,logoAlpha=videoLayout?0:1;
     const vertex=`#version 300 es
     precision highp float;precision highp int;
     uniform vec2 u_resolution;uniform float u_bands[26];uniform float u_scale;uniform float u_opacity;uniform float u_barHeight;uniform int u_logo;
@@ -115,7 +115,7 @@
         for(let i=0;i<26;i++)bands[i]+=(clamp(fresh?desired[i]:0)-bands[i])*(1-Math.exp(-dt/.022));
         for(let i=0;i<4;i++)color[i]+=((fresh?clamp(desiredColor[i]):i===3?0:1)-color[i])*(1-Math.exp(-dt/.035));
         if(logoAlpha>.003||!videoLayout)scale+=((fresh?targetScale:.7)-scale)*(1-Math.exp(-dt/.035));
-        barHeight+=((videoLayout?.75:1)-barHeight)*(1-Math.exp(-dt/.16));
+        barHeight+=((videoLayout?.62:1)-barHeight)*(1-Math.exp(-dt/.16));
         logoAlpha+=((videoLayout?0:1)-logoAlpha)*(1-Math.exp(-dt/.10));
         if(videoLayout&&logoAlpha<.003){logoAlpha=0;freeLogo();}
         alpha+=((enabled?1:0)-alpha)*(1-Math.exp(-dt/.13));

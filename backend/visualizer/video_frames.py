@@ -11,7 +11,7 @@ HEADER = struct.Struct('<4sB3xIQ')
 VIDEO, AUDIO = 1, 2
 VIDEO_DELAY = .250  # Match the audio worklet's small jitter buffer.
 FRAME_HISTORY = 32  # Fixed CPU pixel history in system RAM; never GPU surfaces.
-AUDIO_QUEUE = 16
+AUDIO_QUEUE = 48  # Bounded PCM burst allowance; never drop ordinary pipe bursts.
 
 
 def packet(kind, sequence, stamp, data):

@@ -53,8 +53,8 @@
   function applyGeometry(value=geometry){
     if(!root)return;const {w,h}=size();
     const top=document.getElementById('obs-topbar')?.getBoundingClientRect().bottom||h*.23;
-    const bottom=h-(24+325*.75)*h/1080;
-    const auto=Math.min(w*.94,Math.max(h*.15,bottom-top-30*h/1080)*ratio);
+    const bottom=h-(24+325*.62)*h/1080;
+    const auto=Math.min(w*.94,Math.max(h*.15,bottom-top-16*h/1080)*ratio);
     let width=value?.width>0?value.width*w:auto;width=clamp(width,Math.min(w*.15,h*.15*ratio),Math.min(w*.98,h*.96*ratio));
     const height=width/ratio;
     const x=clamp((value?.x??.5)*w,width/2,w-width/2),y=clamp((value?.y??.5)*h,height/2,h-height/2);
@@ -133,7 +133,7 @@
     if(window.FuraticOBSCreateVideoRenderer)return Promise.resolve(window.FuraticOBSCreateVideoRenderer);
     if(library)return library;
     library=new Promise((resolve,reject)=>{
-      const script=libraryScript=document.createElement('script');script.src=origin+'/obs-video-renderer.js?v=4';
+      const script=libraryScript=document.createElement('script');script.src=origin+'/obs-video-renderer.js?v=5';
       script.onload=()=>{script.onload=script.onerror=null;window.FuraticOBSCreateVideoRenderer?resolve(window.FuraticOBSCreateVideoRenderer):reject(new Error('Player unavailable'));};
       script.onerror=()=>{script.onload=script.onerror=null;script.remove();libraryScript=null;library=null;reject(new Error('Player unavailable'));};
       document.head.appendChild(script);
