@@ -1,18 +1,30 @@
 /* A fixed PCM ring on the audio thread; no decoder and no main-thread scheduling. */
 class FuraticPCM extends AudioWorkletProcessor {
   constructor(){
-    super();this.capacity=192000;this.target=60000;this.left=new Float32Array(this.capacity);this.right=new Float32Array(this.capacity);
+    super();this.capacity=192000;this.target=144000;this.left=new Float32Array(this.capacity);this.right=new Float32Array(this.capacity);
     this.read=0;this.write=0;this.count=0;this.started=false;this.expected=-1;this.audioPort=null;this.dead=false;this.played=0;this.underruns=0;
     this.fraction=0;this.average=this.target;this.rate=1;this.discarded=0;this.discontinuities=0;
-    this.reportFrames=0;this.primingDiscarded=0;
+    this.reportFrames=0;this.primingDiscarded=0;this.recoveries=0;
     this.port.onmessage=e=>{
       if(e.data.type==='port'){
         this.audioPort?.close();this.audioPort=e.data.port;
-        this.audioPort.onmessage=event=>this.push(event.data);this.audioPort.start();
+        this.audioPort.onmessage=event=>{
+          if(event.data.type==='resync')this.resync(event.data.sample);else this.push(event.data);
+        };this.audioPort.start();
       }else if(e.data.type==='stop'){
         this.dead=true;this.audioPort?.close();this.audioPort=null;this.port.close();
       }
     };
+  }
+  resync(sample){
+    // Exceptional recovery only: never wait forever for an already-evicted
+    // picture. Advance within existing PCM; do not clear/recreate the player.
+    if(!Number.isFinite(sample)||this.expected<0||sample>=this.expected-4800)return;
+    const current=this.expected-this.count+this.fraction;
+    const drop=Math.min(Math.max(0,Math.ceil(sample-current)),Math.max(0,this.count-128));
+    if(!drop)return;
+    this.read=(this.read+drop)%this.capacity;this.count-=drop;this.fraction=0;
+    this.average=this.count;this.rate=1;this.recoveries++;
   }
   push(message){
     if(this.dead||message.format!=='f32-planar'||!(message.buffer instanceof ArrayBuffer)||!message.buffer.byteLength)return;
@@ -53,12 +65,14 @@ class FuraticPCM extends AudioWorkletProcessor {
     this.write=(this.write+frames)%this.capacity;
     this.count+=frames;
     if(typeof message.buffer.transfer==='function')message.buffer.transfer(0);
-    this.audioPort?.postMessage({type:'accepted',sequence:message.sequence,queued:this.count,played:this.played,underruns:this.underruns,discarded:this.discarded,discontinuities:this.discontinuities,primingDiscarded:this.primingDiscarded});
+    this.audioPort?.postMessage({type:'accepted',sequence:message.sequence,queued:this.count,played:this.played,underruns:this.underruns,discarded:this.discarded,discontinuities:this.discontinuities,primingDiscarded:this.primingDiscarded,recoveries:this.recoveries});
   }
   process(_input,outputs){
     if(this.dead)return false;
     const out=outputs[0];if(!out?.length)return true;
     const left=out[0],right=out[1]||left;
+    // Three seconds absorb temporary delivery stalls without a silence/refill
+    // cycle. Capacity remains fixed at four seconds.
     // Prime once from ordered PCM. Video follows this actual read position;
     // no wall-clock trimming or guessed independent video delay is needed.
     if(!this.started&&this.count>=this.target){this.started=true;this.average=this.count;this.rate=1;}
@@ -87,7 +101,7 @@ class FuraticPCM extends AudioWorkletProcessor {
       this.reportFrames=0;
       this.audioPort?.postMessage({type:'clock',sample:this.expected<0?0:this.expected-this.count+this.fraction,
         rate:this.rate,playing:this.started,queued:this.count,played:this.played,underruns:this.underruns,
-        discarded:this.discarded,discontinuities:this.discontinuities,primingDiscarded:this.primingDiscarded});
+        discarded:this.discarded,discontinuities:this.discontinuities,primingDiscarded:this.primingDiscarded,recoveries:this.recoveries});
     }
     return true;
   }

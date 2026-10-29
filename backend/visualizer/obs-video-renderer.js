@@ -79,12 +79,12 @@
         const Audio=window.AudioContext||window.webkitAudioContext;
         if(!Audio)throw new Error('This OBS browser lacks Web Audio support');
         context=new Audio({sampleRate:48000,latencyHint:'playback'});
-        await context.audioWorklet.addModule(options.origin+'/obs-video-audio.js?v=4');if(dead)return;
+        await context.audioWorklet.addModule(options.origin+'/obs-video-audio.js?v=5');if(dead)return;
         node=new AudioWorkletNode(context,'furatic-pcm',{numberOfInputs:0,numberOfOutputs:1,outputChannelCount:[2]});
         gain=context.createGain();node.connect(gain);gain.connect(context.destination);api.audio(options.volume,options.muted);
         channel=new MessageChannel();node.port.postMessage({type:'port',port:channel.port1},[channel.port1]);
         // A small classic-worker wrapper also supports an OBS local-file page.
-        workerURL=URL.createObjectURL(new Blob(['importScripts('+JSON.stringify(options.origin+'/obs-video-transport.js?v=6')+');'],{type:'text/javascript'}));
+        workerURL=URL.createObjectURL(new Blob(['importScripts('+JSON.stringify(options.origin+'/obs-video-transport.js?v=7')+');'],{type:'text/javascript'}));
         worker=new Worker(workerURL);worker.onmessage=event=>{
           const message=event.data;if(dead){discard(message);return;}
           if(message.type==='pixels'){
@@ -113,7 +113,9 @@
         // Two fresh arrivals can straddle one display tick. Present both in order;
         // only collapse them after a stall, never build a catch-up frame queue.
         if(ahead&&Date.now()-pending.arrivedAt>50){ack(pending);pending=ahead;ahead=null;}
-        if(pending&&Date.now()-pending.arrivedAt>300){ack(pending);pending=null;}
+        // Keep the newest available picture even after a long render stall.
+        // There are still at most two pixel buffers. Dropping the final one on
+        // every >300 ms tick can otherwise starve presentation indefinitely.
         if(dead||(!pending&&!graphics?.ready))return;
         if(graphics?.gl!==gl)free();if(!graphics)make(gl,pending.pixelFormat);
         if(pending&&pending.pixelFormat!==graphics.pixelFormat)throw new Error('Video pixel format changed');

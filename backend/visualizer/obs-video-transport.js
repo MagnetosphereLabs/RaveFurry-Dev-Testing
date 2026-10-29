@@ -75,6 +75,7 @@ self.onmessage=event=>{
       if(stopped)return;
       if(typeof e.data==='string'){
         let value;try{value=JSON.parse(e.data);}catch(_){return;}
+        if(value.type==='resync'&&Number.isFinite(value.sample)){audioPort?.postMessage({type:'resync',sample:value.sample});return;}
         if(value.type==='session'&&typeof value.id==='string'&&!audioSocket){
           const url=new URL(message.url);url.searchParams.set('track','audio');url.searchParams.set('session',value.id);
           const pcm=audioSocket=new WebSocket(url.href);pcm.binaryType='arraybuffer';pcm.onmessage=onAudio;

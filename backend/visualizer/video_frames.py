@@ -12,7 +12,7 @@ MAX_FRAME_BYTES = FRAME_BYTES
 HEADER = struct.Struct('<4sB3xIQ')
 VIDEO, AUDIO = 1, 2
 VIDEO_DELAY = 1.250  # Fallback only for a source with no audio.
-FRAME_HISTORY = 128  # Fixed CPU history for A/V alignment; no extra GPU surfaces.
+FRAME_HISTORY = 288  # 4.8 s: fixed RAM covers the 4 s PCM ring + device latency.
 AUDIO_QUEUE = 192  # Bounded PCM burst allowance, matching the worker's packet cap.
 
 
@@ -35,6 +35,7 @@ class MediaSession:
         self.clock_at = 0.
         self.clock_rate = 1.
         self.clock_playing = False
+        self.last_resync = -float('inf')
 
     def acknowledge(self, sequence):
         if type(sequence) is int and sequence == self.inflight:
@@ -80,6 +81,13 @@ class FrameStore:
         self.epoch = offset if self.epoch is None else min(self.epoch, offset)
         self.frames.append((now, sequence, data))
 
+    def recovery_sample(self, sample):
+        if sample is None or not self.frames: return None
+        oldest = (self.frames[0][1]-1)*48000/FPS
+        if sample < oldest-48000/FPS:
+            return oldest + 28800  # Include output-device latency when rejoining.
+        return None
+
     def select(self, after, sample=None):
         deadline = time.monotonic()-VIDEO_DELAY
         for received, sequence, data in reversed(self.frames):
@@ -114,6 +122,7 @@ async def read_avi(reader, on_video, on_audio):
             if length != FRAME_BYTES: raise ValueError('Video frame exceeded its transport bound')
             data = await reader.readexactly(length)
             on_video(video_sequence, packet(VIDEO, video_sequence, video_sequence*1000000//FPS, data))
+            await asyncio.sleep(0)  # Let PCM delivery/clock updates run during pipe bursts.
         elif in_media and tag == b'01wb':
             if length > 65536 or length % 4: raise ValueError('Invalid decoded audio packet')
             data = await reader.readexactly(length); audio_sequence += 1

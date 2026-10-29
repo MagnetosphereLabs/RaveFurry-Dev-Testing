@@ -241,8 +241,10 @@ class VideoReceiver:
 
     def command(self, executable):
         p = self.profile()
+        # A 120 ms deadline discards recoverable packets on longer WAN paths.
+        # The receiver negotiates this floor; larger saved values still apply.
         query = urlencode({'mode':'listener','passphrase':p['passphrase'],'pbkeylen':32,
-                           'enforced_encryption':1,'latency':p['latency']*1000,'timeout':5000000,'tlpktdrop':1})
+                           'enforced_encryption':1,'latency':max(750,p['latency'])*1000,'timeout':5000000,'tlpktdrop':1})
         scale = ('scale=1280:720:force_original_aspect_ratio=decrease:force_divisible_by=2'
                  ':flags=fast_bilinear:out_color_matrix=bt709:out_range=tv,'
                  'pad=1280:720:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=60:start_time=0,format=yuv420p')
@@ -504,9 +506,16 @@ def install_routes(app, receiver, port):
                         await session.credit.wait()
                         if session.closed: break
                         session.changed.clear()
-                        if session.has_audio and session.clock_sample is None:
+                        position = session.position() if session.has_audio else None
+                        recovery = receiver.frames.recovery_sample(position)
+                        if recovery is not None and session.clock_playing:
+                            if time.monotonic()-session.last_resync >= 1:
+                                session.last_resync = time.monotonic()
+                                await ws.send_json({'type':'resync', 'sample':recovery})
                             frame = None
-                        else: frame = receiver.frames.select(session.last_sent, session.position() if session.has_audio else None)
+                        elif session.has_audio and (session.clock_sample is None or not session.clock_playing):
+                            frame = None
+                        else: frame = receiver.frames.select(session.last_sent, position)
                         if frame is None:
                             try: await asyncio.wait_for(session.changed.wait(), .010)
                             except asyncio.TimeoutError: pass
