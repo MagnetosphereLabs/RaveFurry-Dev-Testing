@@ -327,8 +327,8 @@
       stage='list';stageAt=performance.now();scrollStart=stageAt+2500;rowBase=-1;deadline=0;listRowSize=listHeight=returnAt=returnFrom=0;
       if(!results?.songs.length){showThanks(true);return;}
       const panel=document.createElement('section');panel.className='obs-chart';
-      panel.innerHTML='<header><div class="obs-chart-heading obs-text-viewport"></div><div class="obs-chart-subtitle obs-text-viewport"></div></header><div class="obs-chart-window"><div class="obs-chart-track"></div></div><div class="obs-chart-footer obs-text-viewport"></div>';
-      enter(panel,'bottom');text(panel.querySelector('.obs-chart-heading'),"TOP SONGS FROM TODAY'S EVENT");text(panel.querySelector('.obs-chart-subtitle'),'Ranked by your votes');text(panel.querySelector('.obs-chart-footer'),'FURATIC · PASS THE AUX!');
+      panel.innerHTML='<header><div class="obs-chart-heading obs-text-viewport"></div><div class="obs-chart-subtitle obs-text-viewport"></div></header><div class="obs-chart-window"><div class="obs-chart-track"></div></div>';
+      enter(panel,'bottom');text(panel.querySelector('.obs-chart-heading'),"TOP SONGS FROM TODAY'S EVENT");text(panel.querySelector('.obs-chart-subtitle'),'Ranked by your votes');
       const track=panel.querySelector('.obs-chart-track');
       for(let i=0;i<8;i++){
         const row=document.createElement('div');row.className='obs-chart-row';row.innerHTML='<div class="obs-chart-rank"></div><div class="obs-chart-art"><canvas></canvas></div><div class="obs-chart-copy"><div class="obs-chart-title obs-text-viewport"></div><div class="obs-chart-artist obs-text-viewport"></div></div><div class="obs-chart-votes obs-text-viewport"></div>';
@@ -475,5 +475,6 @@
     if(ui.snapshot)api.receive(ui.snapshot);
   };
 })();
+
 
 

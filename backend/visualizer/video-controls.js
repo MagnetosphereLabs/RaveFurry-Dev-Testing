@@ -1,14 +1,38 @@
 (() => {
   'use strict';
   const $=id=>document.getElementById(id),fields=['name','bind','port','latency','passphrase','senderIp'];
-  let config=null,token='',socket=null,timer=0,volumeTimer=0,controller=null,writer=null,stopped=false,dirty=false,retry=0,writeChain=Promise.resolve();
-  const message=(text,error=false)=>{$('message').textContent=text||'';$('message').classList.toggle('error',error);};
+  let config=null,token='',socket=null,timer=0,volumeTimer=0,messageTimer=0,controller=null,writer=null,stopped=false,dirty=false,retry=0,writeChain=Promise.resolve(),editing=null,saving=false;
+  const message=(text,error=false)=>{
+    clearTimeout(messageTimer);messageTimer=0;
+    const target=$('profile-dialog').open?$('profile-message'):$('message');
+    for(const box of [$('message'),$('profile-message')]){box.textContent='';box.hidden=true;}
+    target.textContent=text||'';target.hidden=!text;target.classList.toggle('error',error);
+    if(text&&!error)messageTimer=setTimeout(()=>{target.hidden=true;target.textContent='';messageTimer=0;},4000);
+  };
   function profileToForm(){
     const p=config.profiles[config.activeProfile];
     $('profiles').replaceChildren(...Object.entries(config.profiles).map(([key,p])=>{const o=document.createElement('option');o.value=key;o.textContent=p.name;return o;}));
-    $('profiles').value=config.activeProfile;for(const key of fields)$(key).value=p[key];dirty=false;senderUrl();
-    $('remove').disabled=Object.keys(config.profiles).length<2;
+    $('profiles').value=config.activeProfile;$('profiles').disabled=false;$('edit').disabled=false;
+    $('add').disabled=Object.keys(config.profiles).length>=12;
+    $('connection-summary').textContent='UDP '+p.port;
+    if(!editing){for(const key of fields)$(key).value=p[key];dirty=false;}senderUrl();
   }
+  function editProfile(create=false){
+    if(!config||saving||create&&Object.keys(config.profiles).length>=12)return;
+    const current=config.profiles[config.activeProfile];
+    editing=create?'p'+Date.now():config.activeProfile;
+    const p={...current};
+    if(create){p.name='';p.senderIp='';p.passphrase=Array.from(crypto.getRandomValues(new Uint8Array(16)),n=>n.toString(16).padStart(2,'0')).join('');}
+    for(const key of fields)$(key).value=p[key];dirty=false;
+    $('profile-dialog-title').textContent=create?'Add a stream':'Edit connection';
+    $('save-profile').textContent=create?'Add stream':'Save changes';
+    $('remove').hidden=create;$('remove').disabled=Object.keys(config.profiles).length<2;
+    $('passphrase').type='password';$('reveal').textContent='Show';$('reveal').setAttribute('aria-label','Show stream password');
+    $('profile-form').querySelector('details').open=false;$('profile-message').hidden=true;
+    $('profile-dialog').showModal();$('name').focus();if(!create)$('name').select();
+  }
+  function closeProfile(){if(saving)return;editing=null;dirty=false;$('profile-dialog').close();if(config)profileToForm();}
+  function savingProfile(value){saving=value;for(const id of ['save-profile','remove','cancel-profile','close-profile'])$(id).disabled=value;if(!value)$('remove').disabled=Object.keys(config.profiles).length<2;}
   function formToProfile(){
     const p={};for(const key of fields)p[key]=['port','latency'].includes(key)?Number($(key).value):key==='passphrase'?$(key).value:$(key).value.trim();
     return p;
@@ -20,19 +44,20 @@
     $('copy-url').disabled=!ip;
   }
   function render(value){
-    if(value.token)token=value.token;if(value.config){config=value.config;if(!dirty)profileToForm();}
+    if(value.token)token=value.token;if(value.config){config=value.config;profileToForm();}
     if(!config)return;
     for(const key of ['layout','enabled','volume','muted','locked','geometry'])if(value[key]!==undefined)config[key]=value[key];
-    const media=value.media||{},format=[media.videoCodec,media.audioCodec,media.width&&media.height?media.width+' × '+media.height:''].filter(Boolean).join(' · ');
-    $('status').textContent=value.detail+(format?' · '+format:'')+(value.playbackError?' · '+value.playbackError:'');
-    const titles={off:'Receiver stopped',preparing:'Preparing receiver',starting:'Starting receiver',waiting:value.listenerReady?'Ready to receive':'Waiting for sender',receiving:'Live video',reconnecting:'Reconnecting',error:'Connection needs attention',setup_error:'Receiver setup needs attention'};
-    $('status-title').textContent=titles[value.status]||'Connecting';
+    const media=value.media||{},format=media.width&&media.height?media.width+' × '+media.height:'';
+    const titles={off:config.layout==='default'?'Music layout active':'Video receiver stopped',preparing:'Preparing video',starting:'Starting video',waiting:value.listenerReady?'Ready for incoming video':'Waiting for video',receiving:'Video connected',reconnecting:'Reconnecting',error:'Connection needs attention',setup_error:'Video setup needs attention'};
+    $('status-title').textContent=titles[value.status]||'Connecting…';
+    const details=value.status==='off'&&config.layout==='default'?'':['waiting','receiving'].includes(value.status)?[config.profiles[config.activeProfile].name,format].filter(Boolean).join(' · '):value.detail||'';
+    $('status').textContent=[details,value.playbackError].filter(Boolean).join(' · ');$('status').hidden=!$('status').textContent;
     $('receiver-status').dataset.state=value.status||'off';
     $('retry').hidden=!['setup_error','error'].includes(value.status)||value.layout!=='video'||!value.enabled;
     $('retry').textContent=value.status==='setup_error'?'Retry setup':'Retry connection';
     $('firewall').disabled=value.runtimeReady===false||['preparing','starting'].includes(value.status);
     for(const b of document.querySelectorAll('[data-layout]')){b.classList.toggle('selected',b.dataset.layout===value.layout);b.setAttribute('aria-pressed',String(b.dataset.layout===value.layout));}
-    $('enabled').checked=value.enabled;$('muted').checked=value.muted;$('locked').checked=value.locked;
+    $('muted').checked=value.muted;$('locked').checked=value.locked;
     if(document.activeElement!==$('volume'))$('volume').value=Math.round(value.volume*100);
     $('volume-value').textContent=Math.round(Number($('volume').value))+'%';
     if(value.windows!==undefined){$('firewall').hidden=!value.windows;$('firewall-section').hidden=!value.windows;}
@@ -48,7 +73,7 @@
     try{
       const r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json','X-Furatic-Video-Token':token},body:JSON.stringify(value),signal:current.signal});
       if(!r.ok)throw new Error(await r.text());const result=await r.json();
-      if(result.message)message(result.message);else{message('Saved');render(result);}return true;
+      if(result.message)message(result.message);else{message('');render(result);}return true;
     }catch(e){if(!stopped)message(e.message||'Could not save settings. Check the local connection.',true);return false;}
     finally{if(writer===current)writer=null;}
   }
@@ -70,14 +95,29 @@
     if(document.hidden){if(socket){socket.onclose=null;socket.close();socket=null;}}
     else connect();
   }
-  for(const b of document.querySelectorAll('[data-layout]'))b.onclick=()=>send({layout:b.dataset.layout});
-  for(const key of ['enabled','muted','locked'])$(key).onchange=()=>send({[key]:$(key).checked});
+  for(const b of document.querySelectorAll('[data-layout]'))b.onclick=()=>send({layout:b.dataset.layout,enabled:b.dataset.layout==='video'});
+  for(const key of ['muted','locked'])$(key).onchange=()=>send({[key]:$(key).checked});
   for(const key of fields)$(key).oninput=()=>{dirty=true;};
-  $('profile-form').onsubmit=async e=>{e.preventDefault();if(!config)return;const next=JSON.parse(JSON.stringify(config));next.profiles[next.activeProfile]=formToProfile();if(await send(next)){dirty=false;profileToForm();}};
+  $('profile-form').onsubmit=async e=>{
+    e.preventDefault();if(!config||!editing||saving)return;
+    const next=JSON.parse(JSON.stringify(config));next.profiles[editing]=formToProfile();next.activeProfile=editing;
+    savingProfile(true);const saved=await send(next);savingProfile(false);
+    if(saved){closeProfile();message('Stream saved.');}
+  };
   $('profile-form').addEventListener('invalid',e=>{const details=e.target.closest('details');if(details)details.open=true;},true);
-  $('profiles').onchange=async()=>{if(!config)return;const next=JSON.parse(JSON.stringify(config));next.profiles[next.activeProfile]=formToProfile();next.activeProfile=$('profiles').value;if(await send(next)){dirty=false;profileToForm();}};
-  $('add').onclick=async()=>{if(!config)return;if(Object.keys(config.profiles).length>=12){message('Up to 12 receiver profiles are supported.');return;}const next=JSON.parse(JSON.stringify(config)),id='p'+Date.now();next.profiles[next.activeProfile]=formToProfile();const names=new Set(Object.values(next.profiles).map(p=>p.name));let number=1;while(names.has('Stream '+number))number++;next.profiles[id]={...next.profiles[next.activeProfile],name:'Stream '+number,senderIp:''};next.activeProfile=id;if(await send(next)){dirty=false;profileToForm();$('name').focus();$('name').select();}};
-  $('remove').onclick=async()=>{if(!config||Object.keys(config.profiles).length<2)return;const next=JSON.parse(JSON.stringify(config));delete next.profiles[next.activeProfile];next.activeProfile=Object.keys(next.profiles)[0];if(await send(next)){dirty=false;profileToForm();}};
+  $('profiles').onchange=async()=>{if(!config)return;await send({activeProfile:$('profiles').value});profileToForm();};
+  $('add').onclick=()=>editProfile(true);$('edit').onclick=()=>editProfile();
+  $('cancel-profile').onclick=$('close-profile').onclick=closeProfile;
+  $('profile-dialog').oncancel=e=>{if(saving)e.preventDefault();};
+  $('profile-dialog').onclose=()=>{editing=null;dirty=false;$('profile-message').hidden=true;if(config)profileToForm();};
+  $('remove').onclick=async()=>{
+    if(!config||!editing||saving||Object.keys(config.profiles).length<2||!config.profiles[editing])return;
+    if(!window.confirm('Delete the saved stream “'+config.profiles[editing].name+'”?'))return;
+    const next=JSON.parse(JSON.stringify(config));delete next.profiles[editing];
+    if(next.activeProfile===editing)next.activeProfile=Object.keys(next.profiles)[0];
+    savingProfile(true);const saved=await send(next);savingProfile(false);
+    if(saved){closeProfile();message('Stream deleted.');}
+  };
   $('reveal').onclick=()=>{const hidden=$('passphrase').type==='password';$('passphrase').type=hidden?'text':'password';$('reveal').textContent=hidden?'Hide':'Show';$('reveal').setAttribute('aria-label',hidden?'Hide stream password':'Show stream password');};
   $('volume').oninput=()=>{const volume=Number($('volume').value)/100;$('volume-value').textContent=Math.round(volume*100)+'%';clearTimeout(volumeTimer);volumeTimer=setTimeout(()=>send({volume}),180);};
   $('volume').onchange=()=>{clearTimeout(volumeTimer);send({volume:Number($('volume').value)/100});};
@@ -87,8 +127,9 @@
   $('destination').oninput=()=>{senderUrl();try{localStorage.setItem('furatic.obs.senderDestination',$('destination').value);}catch(_){}};
   $('firewall').onclick=async()=>{if(dirty){message('Save the receiver profile before requesting firewall permission.');return;}const b=$('firewall');b.disabled=true;message('Approve the Windows permission prompt on this PC.');await send({},'/video/firewall');b.disabled=false;};
   $('retry').onclick=async()=>{const b=$('retry');b.disabled=true;await send({},'/video/retry');b.disabled=false;};
-  $('copy-url').onclick=async()=>{try{await navigator.clipboard.writeText($('sender-url').value);message('Sender URL copied.');}catch(_){$('sender-url').focus();$('sender-url').select();message('Press Ctrl+C to copy the selected URL.');}};
+  $('copy-url').onclick=async()=>{try{await navigator.clipboard.writeText($('sender-url').value);message('OBS server address copied.');}catch(_){$('sender-url').focus();$('sender-url').select();message('Press Ctrl+C to copy the selected address.');}};
   document.addEventListener('visibilitychange',visibility);
-  window.addEventListener('pagehide',()=>{stopped=true;clearTimeout(timer);clearTimeout(volumeTimer);controller?.abort();writer?.abort();if(socket){socket.onopen=socket.onmessage=socket.onclose=socket.onerror=null;socket.close();socket=null;}document.removeEventListener('visibilitychange',visibility);},{once:true});
+  window.addEventListener('pagehide',()=>{stopped=true;clearTimeout(timer);clearTimeout(volumeTimer);clearTimeout(messageTimer);controller?.abort();writer?.abort();if(socket){socket.onopen=socket.onmessage=socket.onclose=socket.onerror=null;socket.close();socket=null;}document.removeEventListener('visibilitychange',visibility);},{once:true});
   visibility();
 })();
+
