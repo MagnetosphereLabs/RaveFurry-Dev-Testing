@@ -1,9 +1,10 @@
 /* A fixed PCM ring on the audio thread; no decoder and no main-thread scheduling. */
 class FuraticPCM extends AudioWorkletProcessor {
   constructor(){
-    super();this.capacity=48000;this.left=new Float32Array(this.capacity);this.right=new Float32Array(this.capacity);
+    super();this.capacity=96000;this.target=36000;this.left=new Float32Array(this.capacity);this.right=new Float32Array(this.capacity);
     this.read=0;this.write=0;this.count=0;this.started=false;this.expected=-1;this.audioPort=null;this.dead=false;this.played=0;this.underruns=0;
-    this.fraction=0;this.average=12000;this.rate=1;
+    this.fraction=0;this.average=this.target;this.rate=1;this.discarded=0;this.discontinuities=0;
+    this.warmup=0;this.primingDiscarded=0;
     this.port.onmessage=e=>{
       if(e.data.type==='port'){
         this.audioPort?.close();this.audioPort=e.data.port;
@@ -22,14 +23,16 @@ class FuraticPCM extends AudioWorkletProcessor {
     const skip=Math.min(total,Math.max(0,-gap)),frames=total-skip;
     this.expected=Math.max(this.expected,message.sample+total);
     // Preserve already-buffered sound across a small missing/duplicate packet.
-    // Only a real interruption (>250 ms) starts a fresh playback timeline.
-    if(gap>12000){this.count=0;this.read=this.write;this.started=false;this.fraction=0;this.average=12000;this.rate=1;}
-    const bridge=gap>0&&gap<=12000;
-    // Trim excess age without emptying the ring and inserting another 250 ms
-    // of silence. The ring remains fixed at one second of stereo samples.
-    if(this.count+frames>24000){
-      const drop=Math.min(this.count,this.count+frames-18000);
+    // Only a gap larger than the playback cushion starts a fresh timeline.
+    if(gap>this.target){this.count=0;this.read=this.write;this.started=false;this.warmup=0;this.fraction=0;this.average=this.target;this.rate=1;this.discontinuities++;}
+    const bridge=gap>0&&gap<=this.target;
+    // 750 ms of startup cushion absorbs ordinary delivery bursts. Do not trim
+    // at 500 ms: that discarded valid sound every time a batch arrived. Only
+    // actual exhaustion of the fixed two-second ring may discard old samples.
+    if(this.count+frames>this.capacity){
+      const drop=this.count+frames-this.capacity;
       this.read=(this.read+drop)%this.capacity;this.count-=drop;this.fraction=0;
+      if(this.started)this.discarded+=drop;else this.primingDiscarded+=drop;
     }
     const tail=(this.write+this.capacity-1)%this.capacity;
     const previousLeft=this.count?this.left[tail]:0,previousRight=this.count?this.right[tail]:0;
@@ -41,13 +44,23 @@ class FuraticPCM extends AudioWorkletProcessor {
     }
     this.count+=frames;
     if(typeof message.buffer.transfer==='function')message.buffer.transfer(0);
-    this.audioPort?.postMessage({type:'accepted',sequence:message.sequence,queued:this.count,played:this.played,underruns:this.underruns});
+    this.audioPort?.postMessage({type:'accepted',sequence:message.sequence,queued:this.count,played:this.played,underruns:this.underruns,discarded:this.discarded,discontinuities:this.discontinuities,primingDiscarded:this.primingDiscarded});
   }
   process(_input,outputs){
     if(this.dead)return false;
     const out=outputs[0];if(!out?.length)return true;
-    if(!this.started&&this.count>=12000){this.started=true;this.average=this.count;}
     const left=out[0],right=out[1]||left;
+    if(!this.started&&this.expected>=0){
+      this.warmup+=left.length;
+      // Let the initial decoder/pipe burst settle before making sound. At this
+      // silent join point only, align to the latest 750 ms, matching the video
+      // delay instead of carrying an old startup backlog throughout the stream.
+      if(this.warmup>=sampleRate*.750&&this.count>=this.target){
+        const old=this.count-this.target;this.read=(this.read+old)%this.capacity;
+        this.count=this.target;this.primingDiscarded+=old;this.fraction=0;
+        this.started=true;this.average=this.target;this.rate=1;
+      }
+    }
     // AudioContext requests 48 kHz; use its actual rate for machines that
     // override it rather than changing the pitch or the incoming timeline.
     // Sender and sound-device clocks drift even when both report 48 kHz.
@@ -55,12 +68,12 @@ class FuraticPCM extends AudioWorkletProcessor {
     // packet timing jitter is averaged rather than followed packet by packet.
     if(this.started){
       this.average+=(this.count-this.average)*.002;
-      const target=1+Math.max(-.003,Math.min(.003,(this.average-12000)/12000*.006));
+      const target=1+Math.max(-.003,Math.min(.003,(this.average-this.target)/this.target*.006));
       this.rate+=(target-this.rate)*.002;
     }
     const step=48000/sampleRate*this.rate;
     for(let i=0;i<left.length;i++){
-      if(!this.started||this.count<2){left[i]=right[i]=0;if(this.started)this.underruns++;this.started=false;continue;}
+      if(!this.started||this.count<2){left[i]=right[i]=0;if(this.started){this.underruns++;this.warmup=0;}this.started=false;continue;}
       const next=(this.read+1)%this.capacity,f=this.fraction;
       left[i]=this.left[this.read]*(1-f)+this.left[next]*f;
       right[i]=this.right[this.read]*(1-f)+this.right[next]*f;

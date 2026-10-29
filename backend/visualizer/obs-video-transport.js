@@ -24,7 +24,7 @@ function audio(message){
   // Audio is ordered, unlike disposable video frames. A scheduling burst must
   // not replace the middle of a sentence with only its newest packet.
   audioPending.push(message);audioPendingFrames+=(message.buffer.byteLength-20)/4;
-  while(audioPending.length>32||audioPendingFrames>32768){
+  while(audioPending.length>96||audioPendingFrames>96000){
     const old=audioPending.shift();audioPendingFrames-=(old.buffer.byteLength-20)/4;
     if(typeof old.buffer.transfer==='function')old.buffer.transfer(0);
   }

@@ -9,9 +9,9 @@ FRAME_BYTES = WIDTH * HEIGHT * 3 // 2
 MAX_FRAME_BYTES = FRAME_BYTES
 HEADER = struct.Struct('<4sB3xIQ')
 VIDEO, AUDIO = 1, 2
-VIDEO_DELAY = .250  # Match the audio worklet's small jitter buffer.
-FRAME_HISTORY = 32  # Fixed CPU pixel history in system RAM; never GPU surfaces.
-AUDIO_QUEUE = 48  # Bounded PCM burst allowance; never drop ordinary pipe bursts.
+VIDEO_DELAY = .750  # Match the audio worklet's 750 ms playback cushion.
+FRAME_HISTORY = 64  # Fixed CPU history for A/V alignment; no extra GPU surfaces.
+AUDIO_QUEUE = 96  # Bounded PCM burst allowance, matching the worker's packet cap.
 
 
 def packet(kind, sequence, stamp, data):
